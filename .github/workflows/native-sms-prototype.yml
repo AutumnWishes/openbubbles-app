@@ -47,6 +47,9 @@ jobs:
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/flutter/bin/flutter" --suppress-analytics --no-version-check --version
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: 'false'
       - name: Install Android SDK packages
         run: sdkmanager 'platforms;android-36' 'build-tools;34.0.0' 'build-tools;36.0.0' 'platform-tools'
       - name: Select prototype build number
