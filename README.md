@@ -14,6 +14,14 @@ relevant files change. **Run workflow** also allows a manual build.
 
 [Build instructions, current limitations, and validation](docs/native-sms-development.md)
 
+The **Build OpenBubbles SMS Alpha** workflow targets the full app with the same
+SMS screen. Its artifact is **OpenBubbles-SMS-Alpha-arm64-test** and installs as
+**OpenBubbles (Alpha)** alongside the official app. The setup screen offers
+**Use Phone SMS without iMessage setup**. Fresh Apple activation is a separate,
+unverified requirement; a successful APK build does not establish working iMessage.
+
+[Full alpha build and phone-test instructions](docs/full-app-alpha.md)
+
 The original OpenBubbles project description follows.
 
 OpenBubbles is an open-source and cross-platform ecosystem of apps aimed to bring Apple platform services to Android and Windows! With OpenBubbles, you'll be able to send messages, media, and much more to your friends and family.

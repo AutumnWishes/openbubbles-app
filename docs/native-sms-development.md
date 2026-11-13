@@ -89,9 +89,10 @@ and download **SMS-Prototype-arm64-test**. Extract the ZIP to obtain the APK.
 The artifact also contains its SHA-256 checksum, source commit, and build number.
 Local builds default to Android version code `2001`; set
 `PROTOTYPE_BUILD_NUMBER` to override it. GitHub builds use `2001 + run_number`.
-The inherited **Full OpenBubbles upstream build** workflow is manual-only in this
-fork because its Apple activation dependencies are not supplied by this SMS
-project. A successful prototype build does not verify the full OpenBubbles APK.
+The separate **Build OpenBubbles SMS Alpha** workflow builds the complete public
+app with these SMS additions. Its Apple activation requirements remain distinct
+from compilation. A successful prototype build does not verify the full app;
+see [the alpha instructions](full-app-alpha.md) for its installation and test scope.
 
 Both build modes use a generated Android debug/test signing key. Release mode
 optimizes the binary; it does not make this a verified production release.
@@ -99,7 +100,9 @@ Fresh GitHub-hosted runners can generate a different test signing key. An APK
 with a different key cannot update an earlier prototype installation in place;
 removing the prototype clears its local outbox/read state. This applies only to
 **SMS Prototype**, not the separately installed OpenBubbles application.
-No cellular transmission has been validated until a physical-phone test succeeds.
+The tester confirmed basic carrier SMS sending and incoming reply display in the
+standalone prototype on November 13, 2026. The remaining device acceptance cases
+below have not all been exercised.
 
 The pure Kotlin multipart status tests can also run without Flutter or Android:
 
@@ -196,11 +199,18 @@ role components. Eligibility alone is insufficient.
   private. Its Android v2 signature validates with the generated test key.
   `libapp.so` and `libflutter.so` have 64 KiB ELF load alignment, and the APK passes
   `zipalign -c -P 16`; these packaging checks support 16 KiB page compatibility.
-- The six edited existing OpenBubbles Dart integration files parsed with the Dart
-  formatter, and `git diff --check` passed. The complete OpenBubbles dependency
-  graph was not type-checked or built.
+- The complete OpenBubbles `main.dart` Android ARM64 debug bundle compiled after
+  resolving the full project's pinned Flutter dependencies. Focused analysis of
+  the integration files found no errors, and the same 22 SMS tests also passed
+  inside the full project. Existing upstream warnings remain. These checks do
+  not establish a working full native APK or Apple activation.
 - The feature patch passed `git apply --check` against a fresh detached checkout
   of the source baseline.
-- No physical carrier send, incoming SMS instrumentation test, or iMessage
-  regression test was performed. The available Linux host has no `/dev/kvm` for
-  an accelerated Android emulator.
+- The tester confirmed basic carrier SMS sending and incoming reply display on
+  a physical Android phone using the standalone prototype on November 13, 2026.
+  No automated incoming SMS instrumentation test or iMessage regression test
+  was performed. The available Linux host has no `/dev/kvm` for an accelerated
+  Android emulator.
+
+See [Full OpenBubbles SMS alpha](full-app-alpha.md) for the next integration build
+and its separate Apple activation and installation limitations.
