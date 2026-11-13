@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:android_play_install_referrer/android_play_install_referrer.dart';
 import 'package:bluebubbles/app/layouts/conversation_list/pages/conversation_list.dart';
+import 'package:bluebubbles/app/layouts/settings/pages/native_sms_page.dart';
 import 'package:bluebubbles/app/layouts/setup/pages/rustpush/appleid_2fa.dart';
 import 'package:bluebubbles/app/layouts/setup/pages/rustpush/appleid_login.dart';
 import 'package:bluebubbles/app/layouts/setup/pages/rustpush/finalize.dart';
@@ -949,6 +950,19 @@ class _SetupViewState extends OptimizedState<SetupView> {
           child: Column(
             children: <Widget>[
               SetupHeader(),
+              if (!kIsWeb && Platform.isAndroid && !ls.isBubble)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.sim_card_outlined),
+                    label: const Text('Use Phone SMS without iMessage setup'),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const NativeSmsPage(),
+                      ),
+                    ),
+                  ),
+                ),
               const SizedBox(height: 20),
               SetupPages(),
             ],

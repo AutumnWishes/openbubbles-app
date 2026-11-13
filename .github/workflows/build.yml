@@ -1,78 +1,83 @@
-# Retained for upstream development. The public full-app build has separate
-# Apple activation dependencies; fork pushes use Build SMS Prototype instead.
+name: Build OpenBubbles SMS Alpha
+
 on:
   workflow_dispatch:
-name: Full OpenBubbles upstream build
-jobs:
-  build:
-    name: OpenBubbles APK
-    runs-on: ubuntu-latest
-    steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
+  push:
+    branches:
+      - feature/full-openbubbles-sms
+    paths:
+      - '.github/workflows/build.yml'
+      - 'tools/full_app_build/**'
+      - 'android/**'
+      - 'lib/**'
+      - 'rust/**'
+      - 'rust_builder/**'
+      - 'rustpush'
+      - 'telephony_plus'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'test/**'
+      - '.env.example'
 
+concurrency:
+  group: full-sms-alpha-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Full OpenBubbles SMS alpha APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+      BOT: 'true'
+      FLUTTER_SUPPRESS_ANALYTICS: 'true'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.workers.max=2'
+    steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+          persist-credentials: false
+      - name: Fetch public submodules over HTTPS
+        run: |
+          git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init --recursive
+          git submodule status --recursive
+      - uses: actions/setup-java@v4
         with:
-          toolchain: stable
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.24.0
-
-      - name: Set up Java
-        uses: actions/setup-java@v2
-        with:
+          distribution: temurin
           java-version: '21'
-          distribution: 'temurin'
-      
-      - name: Setup Android SDK
-        uses: amyu/setup-android@v5
-
-      - name: Install Protobuf compiler
-        run: sudo apt-get install -y protobuf-compiler
-
-      - name: Set up fake Fairplay keys
+      - name: Set up pinned Flutter SDK
         run: |
-          mkdir -p rustpush/certs/fairplay
-
-          cert_names=(
-            "4056631661436364584235346952193"
-            "4056631661436364584235346952194"
-            "4056631661436364584235346952195"
-            "4056631661436364584235346952196"
-            "4056631661436364584235346952197"
-            "4056631661436364584235346952198"
-            "4056631661436364584235346952199"
-            "4056631661436364584235346952200"
-            "4056631661436364584235346952201"
-            "4056631661436364584235346952208"
-          )
-
-          for name in "${cert_names[@]}"; do
-              cp rustpush/certs/legacy-fairplay/fairplay.pem rustpush/certs/fairplay/$name.pem
-              cp rustpush/certs/legacy-fairplay/fairplay.crt rustpush/certs/fairplay/$name.crt
-          done
-
-      # First run is expected to fail until ffmpeg_kit_flutter_new is fixed.
-      - name: Run Build Script
+          git clone --depth 1 --branch 3.24.0 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = '80c2e84975bbd28ecf5f8d4bd4ca5a2490bfc819'
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" --suppress-analytics --no-version-check --version
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: 'false'
+      - name: Install Android build packages
+        run: sdkmanager 'platforms;android-36' 'build-tools;34.0.0' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
+      - name: Set up Rust and native build tools
         run: |
-          flutter build apk --flavor alpha --debug --target-platform android-arm64
-      
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-linux-android --toolchain stable
+          rustup run stable rustc --version
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler clang pkg-config libssl-dev ninja-build
+      - name: Select alpha build number
+        run: echo "ALPHA_BUILD_NUMBER=$((3000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+      - name: Test and build the complete app
+        run: tools/full_app_build/run.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: Alpha Debug APK
-          path: build/app/outputs/flutter-apk/app-alpha-debug.apk
+          name: OpenBubbles-SMS-Alpha-arm64-test
+          path: |
+            build/app/outputs/flutter-apk/app-alpha-arm64-v8a-release.apk
+            build/app/outputs/flutter-apk/SHA256SUMS.txt
+            build/app/outputs/flutter-apk/BUILD.txt
+          if-no-files-found: error
