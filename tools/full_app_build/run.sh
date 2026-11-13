@@ -37,8 +37,10 @@ fi
   --split-per-abi --no-tree-shake-icons --build-number "$ALPHA_BUILD_NUMBER"
 
 APK_DIR="$ROOT_DIR/build/app/outputs/flutter-apk"
+python3 "$ROOT_DIR/tools/full_app_build/verify_apk.py" \
+  "$APK_DIR/app-arm64-v8a-alpha-release.apk" --output "$APK_DIR/APK-CHECKS.txt"
 cd "$APK_DIR"
-sha256sum app-alpha-arm64-v8a-release.apk > SHA256SUMS.txt
+sha256sum app-arm64-v8a-alpha-release.apk > SHA256SUMS.txt
 {
   printf 'Source commit: %s\n' "$(git -C "$ROOT_DIR" rev-parse HEAD)"
   printf 'Build number: %s\n' "$ALPHA_BUILD_NUMBER"

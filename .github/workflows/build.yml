@@ -69,6 +69,33 @@ jobs:
           rustup run stable rustc --version
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler clang pkg-config libssl-dev ninja-build
+      # Cache public dependency downloads only. Do not cache signing keys,
+      # credentials, .env, application data, APKs, or native build outputs.
+      - name: Restore Flutter package downloads
+        id: pub_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-openbubbles-pub-flutter3.24-${{ hashFiles('pubspec.lock', 'pubspec.yaml') }}
+          restore-keys: ${{ runner.os }}-openbubbles-pub-flutter3.24-
+      - name: Restore Cargo dependency downloads
+        id: cargo_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-openbubbles-cargo-deps-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-openbubbles-cargo-deps-
+      - name: Restore Gradle dependency downloads
+        id: gradle_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper/dists
+          key: ${{ runner.os }}-openbubbles-gradle8.9-java21-${{ hashFiles('android/**/*.gradle', 'android/gradle/wrapper/gradle-wrapper.properties', 'pubspec.lock') }}
+          restore-keys: ${{ runner.os }}-openbubbles-gradle8.9-java21-
       - name: Select alpha build number
         run: echo "ALPHA_BUILD_NUMBER=$((3000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
       - name: Test and build the complete app
@@ -77,7 +104,31 @@ jobs:
         with:
           name: OpenBubbles-SMS-Alpha-arm64-test
           path: |
-            build/app/outputs/flutter-apk/app-alpha-arm64-v8a-release.apk
+            build/app/outputs/flutter-apk/app-arm64-v8a-alpha-release.apk
             build/app/outputs/flutter-apk/SHA256SUMS.txt
             build/app/outputs/flutter-apk/BUILD.txt
+            build/app/outputs/flutter-apk/APK-CHECKS.txt
           if-no-files-found: error
+      # Keep dependency downloads after a failed compilation as well.
+      - name: Save Flutter package downloads
+        if: ${{ !cancelled() && steps.pub_cache.outputs.cache-hit != 'true' && steps.pub_cache.outputs.cache-primary-key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.pub-cache
+          key: ${{ steps.pub_cache.outputs.cache-primary-key }}
+      - name: Save Cargo dependency downloads
+        if: ${{ !cancelled() && steps.cargo_cache.outputs.cache-hit != 'true' && steps.cargo_cache.outputs.cache-primary-key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.cargo_cache.outputs.cache-primary-key }}
+      - name: Save Gradle dependency downloads
+        if: ${{ !cancelled() && steps.gradle_cache.outputs.cache-hit != 'true' && steps.gradle_cache.outputs.cache-primary-key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper/dists
+          key: ${{ steps.gradle_cache.outputs.cache-primary-key }}
