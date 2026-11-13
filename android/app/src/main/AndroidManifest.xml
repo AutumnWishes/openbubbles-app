@@ -136,6 +136,10 @@
         <receiver
             android:name="com.bluebubbles.telephony_plus.send.MySentReceiver"
             android:taskAffinity="com.bluebubbles.messaging.SMS_SENT1" />
+        <!-- Outgoing status only. The existing default SMS app still receives SMS/MMS. -->
+        <receiver
+            android:name=".services.sms.NativeSmsSentReceiver"
+            android:exported="false" />
 
         <service
             android:name=".services.facetime.FaceTimeInCallService"

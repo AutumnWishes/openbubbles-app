@@ -159,6 +159,7 @@ class CupertinoHeader extends StatelessWidget implements PreferredSizeWidget {
                           child: Align(alignment: Alignment.topRight, child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              NativeSmsButton(controller: controller),
                               FaceTimeBtn(controller: controller),
                               ManualMark(controller: controller),
                             ],

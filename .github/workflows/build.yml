@@ -1,5 +1,8 @@
-on: [ push, pull_request ]
-name: Build
+# Retained for upstream development. The public full-app build has separate
+# Apple activation dependencies; fork pushes use Build SMS Prototype instead.
+on:
+  workflow_dispatch:
+name: Full OpenBubbles upstream build
 jobs:
   build:
     name: OpenBubbles APK

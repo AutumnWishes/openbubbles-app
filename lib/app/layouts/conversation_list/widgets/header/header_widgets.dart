@@ -1,4 +1,5 @@
 import 'package:auto_size_text/auto_size_text.dart';
+import 'package:bluebubbles/app/layouts/settings/pages/native_sms_page.dart';
 import 'package:bluebubbles/app/components/avatars/contact_avatar_widget.dart';
 import 'package:bluebubbles/app/layouts/conversation_list/pages/search/search_view.dart';
 import 'package:bluebubbles/app/layouts/conversation_view/pages/conversation_view.dart';
@@ -132,10 +133,19 @@ class MaterialOverflowMenu extends StatelessWidget {
           goToFaceTime(context);
         } else if (value == 11) {
           goToPasswords(context);
+        } else if (value == 12) {
+          Navigator.of(context).push(MaterialPageRoute<void>(
+            builder: (_) => const NativeSmsPage(),
+          ));
         }
       },
       itemBuilder: (context) {
         return <PopupMenuItem<int>>[
+          if (!kIsWeb && !ls.isBubble && defaultTargetPlatform == TargetPlatform.android)
+            const PopupMenuItem(
+              value: 12,
+              child: Text('SMS on this phone'),
+            ),
           PopupMenuItem(
             value: 0,
             child: Text(
@@ -279,6 +289,14 @@ class CupertinoOverflowMenu extends StatelessWidget {
       ),
       animationAlignmentOverride: Alignment.topRight,
       itemBuilder: (context) => [
+        if (!kIsWeb && !ls.isBubble && defaultTargetPlatform == TargetPlatform.android)
+          PullDownMenuItem(
+            title: 'SMS on this phone',
+            icon: CupertinoIcons.chat_bubble_text,
+            onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+              builder: (_) => const NativeSmsPage(),
+            )),
+          ),
         PullDownMenuHeader(
           title: ss.settings.redactedMode.value ? "User Name" : ss.settings.userName.value,
           icon: CupertinoIcons.chevron_right,

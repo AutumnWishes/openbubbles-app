@@ -113,6 +113,7 @@ class MaterialHeader extends StatelessWidget implements PreferredSizeWidget {
               launchUrl(Uri(scheme: "mailto", path: controller.chat.participants.first.address));
             },
           ),
+        NativeSmsButton(controller: controller),
         FaceTimeBtn(controller: controller),
         Padding(
           padding: EdgeInsets.only(top: kIsDesktop ? 20 : 0),

@@ -1,0 +1,12 @@
+plugins {
+    id 'org.jetbrains.kotlin.jvm'
+    id 'application'
+}
+
+kotlin {
+    jvmToolchain(21)
+}
+
+application {
+    mainClass = 'com.bluebubbles.messaging.services.sms.NativeSmsStatusTestKt'
+}

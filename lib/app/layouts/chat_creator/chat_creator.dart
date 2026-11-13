@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:bluebubbles/app/components/custom_text_editing_controllers.dart';
+import 'package:bluebubbles/app/layouts/settings/pages/native_sms_page.dart';
 import 'package:bluebubbles/app/layouts/chat_creator/widgets/chat_creator_tile.dart';
 import 'package:bluebubbles/app/layouts/conversation_view/pages/conversation_view.dart';
 import 'package:bluebubbles/app/layouts/conversation_view/widgets/text_field/conversation_text_field.dart';
@@ -927,6 +928,26 @@ class ChatCreatorState extends OptimizedState<ChatCreator> {
                             }
                           }
                           if (!iMessage && ss.settings.smsForwardingTargets.keys.isEmpty) {
+                            // Plain, single-recipient Android SMS stays inside this app.
+                            // NativeSmsPage asks for permissions and a SIM, and requires
+                            // an explicit send. Group messages and media retain the MMS path.
+                            final address = selectedContacts.length == 1
+                                ? selectedContacts.single.address
+                                : null;
+                            final hasAttachments = widget.initialAttachments.isNotEmpty ||
+                                (fakeController.value?.pickedAttachments.isNotEmpty ?? false);
+                            if (!kIsWeb && !ls.isBubble && defaultTargetPlatform == TargetPlatform.android &&
+                                address != null && !hasAttachments &&
+                                RegExp(r'^\+?[0-9][0-9\s().-]*$').hasMatch(address)) {
+                              if (!mounted) return;
+                              await Navigator.of(context).push(MaterialPageRoute<void>(
+                                builder: (_) => NativeSmsPage(
+                                  initialAddress: address,
+                                  initialBody: textController.text,
+                                ),
+                              ));
+                              return;
+                            }
                             // we have no one to sms forward to, open the default messaging app
                             if (kIsDesktop) {
                               showSnackbar("Someone's not on iMessage!", "Enable SMS forwarding on another device!");

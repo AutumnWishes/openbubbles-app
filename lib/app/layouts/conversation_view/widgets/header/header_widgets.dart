@@ -2,12 +2,14 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:bluebubbles/app/layouts/chat_creator/chat_creator.dart';
+import 'package:bluebubbles/app/layouts/settings/pages/native_sms_page.dart';
 import 'package:bluebubbles/app/wrappers/stateful_boilerplate.dart';
 import 'package:bluebubbles/helpers/helpers.dart';
 import 'package:bluebubbles/database/models.dart';
 import 'package:bluebubbles/services/rustpush/rustpush_service.dart';
 import 'package:bluebubbles/services/services.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:universal_io/io.dart';
@@ -15,6 +17,39 @@ import 'package:bluebubbles/services/network/backend_service.dart';
 import 'package:bluebubbles/src/rust/api/api.dart' as api;
 import 'package:bluebubbles/utils/logger/logger.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+/// Opens the SIM-backed SMS conversation without changing this chat's Apple route.
+/// A draft is copied, never sent automatically or removed from its original chat.
+class NativeSmsButton extends StatelessWidget {
+  const NativeSmsButton({super.key, required this.controller});
+
+  final ConversationViewController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final participants = controller.chat.participants;
+    if (kIsWeb || !Platform.isAndroid || ls.isBubble || participants.length != 1) {
+      return const SizedBox.shrink();
+    }
+    final address = participants.single.address;
+    // Include short codes, but do not offer replies to email/alphanumeric senders.
+    if (!RegExp(r'^\+?[0-9][0-9\s().-]*$').hasMatch(address)) {
+      return const SizedBox.shrink();
+    }
+    return IconButton(
+      tooltip: 'SMS through this phone',
+      icon: const Icon(Icons.sms_outlined),
+      onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => NativeSmsPage(
+          initialAddress: address,
+          initialBody: controller.pickedAttachments.isEmpty
+              ? controller.textController.text
+              : null,
+        ),
+      )),
+    );
+  }
+}
 
 class ManualMark extends StatefulWidget {
   const ManualMark({required this.controller});

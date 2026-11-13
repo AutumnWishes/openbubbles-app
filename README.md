@@ -1,5 +1,21 @@
 # OpenBubbles
 
+## Experimental native SMS fork
+
+This fork adds an experimental **Phone SMS** screen that uses the Android phone's
+SIM. The automatic **Build SMS Prototype** workflow builds a separate test app
+from the same SMS code, without Apple activation or iMessage. It does not yet
+support MMS, RCS, or becoming the default SMS app.
+
+To download a test build, open **Actions → Build SMS Prototype**, select a
+successful run, and download **SMS-Prototype-arm64-test** under **Artifacts**.
+Pushes to `feature/native-android-sms` and `rustpush` build automatically when
+relevant files change. **Run workflow** also allows a manual build.
+
+[Build instructions, current limitations, and validation](docs/native-sms-development.md)
+
+The original OpenBubbles project description follows.
+
 OpenBubbles is an open-source and cross-platform ecosystem of apps aimed to bring Apple platform services to Android and Windows! With OpenBubbles, you'll be able to send messages, media, and much more to your friends and family.
 
 **Please note that OpenBubbles requires access to a Mac and an Apple ID to function!

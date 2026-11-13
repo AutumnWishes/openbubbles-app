@@ -1,0 +1,68 @@
+name: Build SMS Prototype
+
+# Builds the experimental SMS app in this fork; it does not publish a release.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/native-android-sms
+      - rustpush
+    paths:
+      - '.github/workflows/native-sms-prototype.yml'
+      - 'tools/native_sms_harness/**'
+      - 'lib/**'
+      - 'android/**'
+      - 'test/services/native_sms/**'
+      - 'docs/native-sms-development.md'
+      - 'README.md'
+
+concurrency:
+  group: sms-prototype-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      BOT: 'true'
+      FLUTTER_SUPPRESS_ANALYTICS: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up pinned Flutter SDK
+        shell: bash
+        run: |
+          git clone --depth 1 --branch 3.24.0 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = '80c2e84975bbd28ecf5f8d4bd4ca5a2490bfc819'
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" --suppress-analytics --no-version-check --version
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: sdkmanager 'platforms;android-36' 'build-tools;34.0.0' 'build-tools;36.0.0' 'platform-tools'
+      - name: Select prototype build number
+        run: echo "PROTOTYPE_BUILD_NUMBER=$((2001 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+      - name: Analyze, test, and build shared SMS source
+        run: tools/native_sms_harness/run.sh apk-release
+      - name: Record artifact checksum and source commit
+        working-directory: build/native_sms_harness/build/app/outputs/flutter-apk
+        run: |
+          sha256sum app-arm64-v8a-release.apk > SHA256SUMS.txt
+          printf 'Source commit: %s\nBuild number: %s\n' "$GITHUB_SHA" "$PROTOTYPE_BUILD_NUMBER" > BUILD.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMS-Prototype-arm64-test
+          path: |
+            build/native_sms_harness/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            build/native_sms_harness/build/app/outputs/flutter-apk/SHA256SUMS.txt
+            build/native_sms_harness/build/app/outputs/flutter-apk/BUILD.txt
+          if-no-files-found: error
