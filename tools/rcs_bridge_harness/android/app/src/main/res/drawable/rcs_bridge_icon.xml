@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#4B3369" android:pathData="M24,2 A22,22 0,1 1,24,46 A22,22 0,1 1,24,2" />
+    <path android:fillColor="#F4EFF9" android:pathData="M12,11 H36 V31 H23 L15,38 V31 H12 Z" />
+    <path android:fillColor="#4B3369" android:pathData="M17,17 H31 V20 H17 Z M17,23 H27 V26 H17 Z" />
+</vector>

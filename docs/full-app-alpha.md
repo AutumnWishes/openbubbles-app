@@ -105,5 +105,11 @@ is included as `APK-CHECKS.txt` in the artifact.
 The tester confirmed basic carrier SMS sending and incoming reply display on a
 physical Android phone using **SMS Prototype** on November 13, 2026. This is
 evidence for the shared SMS implementation, not a full-app launch or iMessage
-regression test. Full-alpha installation, startup, SMS permissions, carrier send,
-incoming refresh, and Apple activation must be checked separately on a phone.
+regression test.
+
+On November 14, 2026, the tester also confirmed that **OpenBubbles (Alpha)** opens
+and sends/receives carrier SMS on both active SIMs, the messages appear in Google
+Messages for both lines, and incoming messages appear after closing and reopening
+Alpha. This validates the basic full-app SMS phone test. It does not validate
+fresh Apple activation, MMS, RCS, a default-SMS role, background SMS notifications,
+or the broader failure/retry and multipart acceptance cases.

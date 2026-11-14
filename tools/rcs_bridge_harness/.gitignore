@@ -1,0 +1,26 @@
+# Generated build outputs and downloaded dependency sources.
+.deps/
+.tools/
+.cache/
+build/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/libs/
+android/local.properties
+bridge/.deps/
+bridge/vendor/
+
+# Never commit login material, private sessions, or signing keys.
+*.json
+*.jsonl
+*.keystore
+*.jks
+*.key
+*.log
+*.curl
+*.har
+cookies.txt
+session.txt
+credentials.txt
+__pycache__/

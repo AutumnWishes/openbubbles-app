@@ -80,7 +80,7 @@ def main():
         if badging.returncode:
             raise ValueError('aapt2 could not inspect the APK: ' + badging.stdout.strip())
         selected = [line for line in badging.stdout.splitlines()
-                    if line.startswith(('package:', 'sdkVersion:', 'targetSdkVersion:', 'native-code:'))]
+                    if line.startswith(('package:', 'sdkVersion:', 'minSdkVersion:', 'targetSdkVersion:', 'native-code:'))]
         report.extend(selected)
         package = re.search(r"^package: name='([^']+)'", badging.stdout, re.MULTILINE)
         if package is None or package.group(1) != args.expected_package:
@@ -128,7 +128,7 @@ def main():
 
     report.extend(['', 'Errors: ' + str(len(errors)), *('ERROR: ' + text for text in errors),
                    'Warnings: ' + str(len(warnings)), *('WARNING: ' + text for text in warnings),
-                   '', 'This verifies packaging only. Phone execution, SMS and iMessage activation require device testing.'])
+                   '', 'This verifies packaging only. App startup, account setup and messaging require device testing.'])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text('\n'.join(report) + '\n')
     print(f'APK checks: {len(errors)} errors, {len(warnings)} warnings; report: {output}')

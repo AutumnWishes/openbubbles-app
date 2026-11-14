@@ -1,0 +1,68 @@
+name: Build RCS Bridge Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/google-messages-rcs-poc
+    paths:
+      - '.github/workflows/rcs-bridge-prototype.yml'
+      - 'tools/rcs_bridge_harness/**'
+      - 'tools/full_app_build/verify_apk.py'
+
+concurrency:
+  group: rcs-bridge-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Paired Google Messages RCS test APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: 'true'
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          cache-dependency-path: tools/rcs_bridge_harness/bridge/go.sum
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: 'false'
+      - name: Install pinned Android packages
+        run: sdkmanager 'platforms;android-36' 'build-tools;34.0.0' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+      - name: Select prototype build number
+        run: echo "RCS_BUILD_NUMBER=$((4000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+      - name: Test, bind, and package the RCS companion
+        run: tools/rcs_bridge_harness/build.sh apk
+      - name: Upload installable test and verification reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: RCS-Bridge-Test-arm64-test
+          path: build/rcs_bridge_harness/artifacts/
+          if-no-files-found: error
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RCS-Bridge-Test-build-diagnostics
+          path: |
+            tools/rcs_bridge_harness/android/app/build/reports/
+            tools/rcs_bridge_harness/android/app/build/test-results/
+          if-no-files-found: ignore

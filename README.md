@@ -22,6 +22,15 @@ unverified requirement; a successful APK build does not establish working iMessa
 
 [Full alpha build and phone-test instructions](docs/full-app-alpha.md)
 
+## Experimental Google Messages RCS bridge test
+
+The separate **Build RCS Bridge Test** workflow packages a paired Google Messages
+client for testing RCS through Google Messages on the same Android phone. It
+does not replace the working SMS Alpha or become the default messaging app.
+The first test uses a local login-file import and needs phone validation.
+
+[RCS bridge test, pairing, and download instructions](tools/rcs_bridge_harness/README.md)
+
 The original OpenBubbles project description follows.
 
 OpenBubbles is an open-source and cross-platform ecosystem of apps aimed to bring Apple platform services to Android and Windows! With OpenBubbles, you'll be able to send messages, media, and much more to your friends and family.

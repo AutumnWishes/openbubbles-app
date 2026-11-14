@@ -1,0 +1,52 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+def prototypeBuildNumber = providers.environmentVariable('RCS_BUILD_NUMBER').getOrElse('4001')
+if (!(prototypeBuildNumber ==~ /[1-9][0-9]{0,7}/)) {
+    throw new GradleException('RCS_BUILD_NUMBER must be a positive integer of at most eight digits.')
+}
+
+android {
+    namespace 'app.openbubbles.rcsprototype'
+    compileSdk 36
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'app.openbubbles.rcsprototype'
+        minSdk 24
+        targetSdk 36
+        versionCode prototypeBuildNumber.toInteger()
+        versionName '0.1.0'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildTypes {
+        release {
+            // An isolated test APK. No production signing material is used.
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+}
+
+dependencies {
+    implementation files('libs/rcsbridge.aar')
+    testImplementation 'junit:junit:4.13.2'
+}

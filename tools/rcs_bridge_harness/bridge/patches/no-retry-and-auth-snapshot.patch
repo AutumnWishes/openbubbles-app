@@ -1,0 +1,116 @@
+diff --git a/pkg/libgm/client.go b/pkg/libgm/client.go
+index 1e24f14..01cdae5 100644
+--- a/pkg/libgm/client.go
++++ b/pkg/libgm/client.go
+@@ -472,6 +472,10 @@ func (c *Client) diffVersionFormat(curr *gmproto.ConfigVersion, latest *gmproto.
+ }
+ 
+ func (c *Client) updateTachyonAuthToken(data *gmproto.TokenData) {
++	// MarshalJSON uses this lock to persist a consistent auth token/expiry pair.
++	// Hold it only for the in-memory update, never for network or event callbacks.
++	c.AuthData.CookiesLock.Lock()
++	defer c.AuthData.CookiesLock.Unlock()
+ 	c.AuthData.TachyonAuthToken = data.GetTachyonAuthToken()
+ 	validForDuration := time.Duration(data.GetTTL()) * time.Microsecond
+ 	if validForDuration == 0 {
+diff --git a/pkg/libgm/harness_safety_test.go b/pkg/libgm/harness_safety_test.go
+new file mode 100644
+index 0000000..a4fe2a5
+--- /dev/null
++++ b/pkg/libgm/harness_safety_test.go
+@@ -0,0 +1,80 @@
++package libgm
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/rs/zerolog"
++	"go.mau.fi/mautrix-gmessages/pkg/libgm/gmproto"
++	"go.mau.fi/util/exhttp"
++)
++
++type harnessRoundTrip func(*http.Request) (*http.Response, error)
++
++func (f harnessRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++// Exercise the real SendMessage path with an entirely local fake transport.
++// No account, network connection, pairing, or recipient is involved.
++func TestHarnessSendDoesNotRetryServerError(t *testing.T) {
++	for _, status := range []int{http.StatusInternalServerError, http.StatusServiceUnavailable} {
++		t.Run(http.StatusText(status), func(t *testing.T) {
++			auth := NewAuthData()
++			client := NewClient(auth, nil, zerolog.Nop(), exhttp.SensibleClientSettings)
++			calls := 0
++			client.http = &http.Client{Transport: harnessRoundTrip(func(req *http.Request) (*http.Response, error) {
++				calls++
++				if req.Method != http.MethodPost {
++					t.Errorf("expected POST, got %s", req.Method)
++				}
++				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"text/plain"}},
++					Body: io.NopCloser(strings.NewReader("offline test failure")), Request: req}, nil
++			})}
++			_, err := client.SendMessage(context.Background(), &gmproto.SendMessageRequest{
++				ConversationID: "offline-conversation", TmpID: "offline-request", ForceRCS: true,
++				MessagePayload: &gmproto.MessagePayload{ConversationID: "offline-conversation", TmpID: "offline-request"},
++			})
++			if err == nil {
++				t.Fatal("server error must not be accepted")
++			}
++			if calls != 1 {
++				t.Fatalf("sent %d HTTP POSTs; must submit exactly once", calls)
++			}
++		})
++	}
++}
++
++// A token refresh must not race an encrypted-session serialization or produce
++// a token from one refresh with the TTL from another refresh. Run with -race.
++func TestHarnessAuthSnapshotDuringRefresh(t *testing.T) {
++	client := &Client{AuthData: NewAuthData(), Logger: zerolog.Nop()}
++	var writers sync.WaitGroup
++	writers.Add(1)
++	go func() {
++		defer writers.Done()
++		for i := 1; i <= 500; i++ {
++			client.updateTachyonAuthToken(&gmproto.TokenData{TachyonAuthToken: []byte{byte(i%251 + 1)}, TTL: int64(i%251+1) * 1000000})
++		}
++	}()
++	for i := 0; i < 500; i++ {
++		encoded, err := json.Marshal(client.AuthData)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var decoded struct {
++			Token []byte `json:"tachyon_token"`
++			TTL   int64  `json:"tachyon_ttl"`
++		}
++		if err := json.Unmarshal(encoded, &decoded); err != nil {
++			t.Fatal(err)
++		}
++		if len(decoded.Token) > 0 && decoded.TTL != int64(decoded.Token[0])*1000000 {
++			t.Fatalf("inconsistent token and TTL snapshot")
++		}
++	}
++	writers.Wait()
++}
+diff --git a/pkg/libgm/http.go b/pkg/libgm/http.go
+index 05b036d..1f22e04 100644
+--- a/pkg/libgm/http.go
++++ b/pkg/libgm/http.go
+@@ -23,7 +23,9 @@ import (
+ const ContentTypeProtobuf = "application/x-protobuf"
+ const ContentTypePBLite = "application/json+protobuf"
+ 
+-const ServerErrorMaxAttempts = 3
++// RCS Bridge Test: a failed POST can already have reached the phone.
++// Never retry automatically, including when the server responds with HTTP 5xx.
++const ServerErrorMaxAttempts = 1
+ const ServerErrorRetryInterval = 1 * time.Second
+ 
+ func (c *Client) makeProtobufHTTPRequest(url string, data proto.Message, contentType string) (*http.Response, error) {
