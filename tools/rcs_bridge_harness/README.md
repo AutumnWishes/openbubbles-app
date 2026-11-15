@@ -70,13 +70,110 @@ send as SMS. If a sent message is reported as SMS/MMS, record that actual protoc
 do not count it as an RCS pass. Do not repeatedly tap Send after an uncertain
 result: check Google Messages first to avoid duplicate messages.
 
-This is a foreground connectivity test. Keep the test app open for live updates;
-use refresh if needed. Briefly switching to Google Messages for pairing is
-supported by keeping the client outside the Activity. Android can still kill
-the process. Background notifications and long-running background reliability
-are not implemented or claimed by this test.
+## Conversation list position and action order (0.2.4)
 
-Use **Diagnostics** when reporting a problem. The copied diagnostic is
+The conversation list remembers its own visible row and pixel offset separately
+from message history. Returning with Back restores that position after layout,
+and list refreshes retain the visible conversation when row order or heights
+change. Notification actions are ordered **Mark as read**, then **Reply**.
+The native bridge and sending behavior are unchanged from 0.2.3.
+
+## Notification actions (0.2.3)
+
+New incoming notifications include **Reply** and **Mark as read**. Reply opens
+Android's inline text field and submits one RCS-only attempt without opening the
+Activity. It uses the conversation's current Google Messages sender SIM, verified
+as active and RCS-enabled; the app's last selected SIM is not used as a fallback.
+Replies retain the existing journal and request-ID duplicate prevention.
+
+Mark as read verifies and marks through the original incoming message identified
+by the notification. It does not mark a newer message that arrived while the
+action was running. Normal history loading still does not send read receipts.
+Read markers outside the most recent fifty messages must be handled in Google
+Messages instead.
+
+Actions use the requested background connection; they do not override Disconnect.
+Requests can wait briefly for an existing connection to restore. Reply text stays
+in memory and is not persisted or automatically retried after process death.
+Status updates distinguish submission from failure or an unconfirmed result, and
+old completions cannot remove newer notifications. An interrupted reply asks the
+user to check its status before trying again. The reply field accepts up to 4000
+characters. Preview settings and generic lock-screen public versions still apply.
+
+Offline tests cover exact read markers, current-SIM reply routing, journal
+deduplication, RemoteInput dispatch, malformed input, queue cancellation and
+recovery feedback. Live read receipts and inline replies need phone testing.
+
+## Notification navigation and previews (0.2.2)
+
+Notification taps open the newest loaded message, including when the same chat
+was already selected in the background. Each explicit navigation has its own
+revision so an older in-flight read cannot satisfy a newer opening. The initial
+scroll is applied after layout; later updates keep the user's scroll position.
+
+Settings includes **Show message previews**, off by default. Enable it to include
+message text and the known conversation name in new incoming notifications.
+Previews keep a generic public version for lock-screen redaction; Android's
+notification settings control what the device displays. Turning previews off
+removes existing incoming notifications but keeps the connection notification.
+Only the preference is persisted; message bodies are not stored by this feature.
+Diagnostics is now under Settings.
+
+System Back returns from a conversation to the chat list. On API 33 and later,
+the app registers the platform back callback only while a conversation is open;
+Back at the chat list retains normal Android behavior. The keyboard can consume
+the first Back gesture when open.
+
+## Conversation refresh fix (0.2.1)
+
+History reads no longer emit unchanged send-journal events, which previously
+caused a repeating history/read/status loop. Read-only refreshes use a separate
+coalescing gate, leaving the composer, draft, focus and cursor available while
+messages load. Repeated events and old history do not trigger redundant reads,
+and unrelated inbox changes do not rebuild the open conversation. Opening a chat
+scrolls to its newest loaded message once; subsequent updates preserve the user's
+scroll position. Notification behavior is unchanged from 0.2.0.
+
+Regression coverage includes native journal events and persistence, JVM refresh
+gates and event filtering, and offline Android checks for typing, initial history
+position and scroll preservation. Live traffic on the phone still needs testing.
+
+## Background connection and notifications (0.2.0)
+
+Pair or Connect starts an Android remote-messaging foreground service with an
+ongoing connection notification. You can leave the Activity or turn off the
+screen. Use Disconnect in the app or ongoing notification to stop it; the saved
+pairing remains encrypted on the device. Forget also stops background work.
+
+Allow message notifications when Android asks. Denying permission does not stop
+the connection, but incoming alerts will be unavailable; use Enable message
+notifications in the app to change the setting. New live incoming RCS messages
+produce generic notifications by default, with optional previews in Settings
+starting in 0.2.2. Tapping one opens its conversation. The visible conversation, outgoing updates, old
+history and duplicate updates do not produce alerts. The in-memory alert filter
+accepts recent events (up to five minutes old) since process startup, so it does
+not notify an entire history backlog after a restart.
+
+The service requests best-effort restart after process reclamation and resumes
+only while the user has requested a connection. It does not start at boot or
+bypass Android Stop, force-stop, Doze, or Samsung battery restrictions. Reopen the
+app after reboot or an explicit Android stop. Notification permission, screen-off
+receipt, power-management behavior and network recovery still need phone testing.
+
+Background acceptance checks:
+1. Update the working build in place, tap Connect, and allow notifications.
+2. Press Home; receive a new RCS message on each SIM and tap each notification.
+3. Repeat with the screen locked, then after Wi-Fi/mobile-data changes.
+4. Reopen the app and confirm connection and selected-conversation loading.
+5. Disconnect from the notification; verify the service stops and does not
+   reconnect on reopening until Connect is tapped.
+6. Deny notifications and verify the connection still works and the app's
+   Disconnect control remains usable even when offline.
+
+Do not treat a successful APK build as evidence of uninterrupted background
+receipt: test the above on the actual phone before main-app integration.
+
+Use **Settings > Diagnostics** when reporting a problem. The copied diagnostic is
 intended to include connection state and sanitized errors only, not credentials,
 message contents, phone numbers, or conversation identifiers. Screenshots of
 this test app are disabled; use that diagnostic text when reporting a problem.

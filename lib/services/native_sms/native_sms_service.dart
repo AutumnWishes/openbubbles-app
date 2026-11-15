@@ -9,6 +9,7 @@ import 'native_sms_models.dart';
 /// A deliberately separate transport: sending an SMS never calls RustPush,
 /// Apple IDS, or the iPhone registration relay.
 class NativeSmsService extends ChangeNotifier {
+  static final NativeSmsService instance = NativeSmsService();
   NativeSmsService({MethodChannel? channel})
       : _channel =
             channel ?? const MethodChannel('com.openbubbles/native_sms') {

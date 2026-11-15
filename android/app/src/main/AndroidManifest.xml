@@ -4,6 +4,7 @@
     package="com.bluebubbles.messaging">
 
     <queries>
+        <package android:name="com.google.android.apps.messaging" />
         <intent>
             <action android:name="com.openbubbles.messaging.MadridExtensionService" />
         </intent>
@@ -32,6 +33,7 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" /> <!-- Notifications / Background Tasks -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -85,6 +87,11 @@
         android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true"
         tools:replace="android:label">
+        <service
+            android:name=".services.rcs.RcsBridgeService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="remoteMessaging" />
         <receiver
             android:name=".services.facetime.FaceTimeActionReceiver"
             android:enabled="true"

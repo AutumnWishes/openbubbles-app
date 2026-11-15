@@ -12,7 +12,7 @@ GRADLE_COMMAND="${GRADLE_BIN:-gradle}"
 MODE="${1:-apk}"
 UPSTREAM_SHA='b826f892d87274d465fb5b903870a831c12714ad'
 MOBILE_VERSION='v0.0.0-20261011034528-197770444867'
-RCS_BUILD_NUMBER="${RCS_BUILD_NUMBER:-4001}"
+RCS_BUILD_NUMBER="${RCS_BUILD_NUMBER:-4007}"
 export GOTOOLCHAIN=local
 
 case "$MODE" in go-test|bind|apk) ;; *) echo "Usage: $0 [go-test|bind|apk]" >&2; exit 2 ;; esac

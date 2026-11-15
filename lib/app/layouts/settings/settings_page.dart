@@ -1,5 +1,5 @@
 import 'package:adaptive_theme/adaptive_theme.dart';
-import 'package:bluebubbles/app/layouts/settings/pages/native_sms_page.dart';
+import 'package:bluebubbles/app/layouts/unified_inbox/unified_inbox_page.dart';
 import 'package:bluebubbles/app/components/avatars/contact_avatar_widget.dart';
 import 'package:bluebubbles/app/layouts/settings/pages/advanced/notification_providers_panel.dart';
 import 'package:bluebubbles/app/layouts/settings/pages/advanced/tasker_panel.dart';
@@ -134,13 +134,13 @@ class _SettingsPageState extends OptimizedState<SettingsPage> {
                                   children: [
                                     SettingsTile(
                                       backgroundColor: tileColor,
-                                      title: 'SMS on this phone',
-                                      subtitle: 'Read and send texts through your SIM',
+                                      title: 'SMS and RCS inbox',
+                                      subtitle: 'Google Messages RCS and phone SMS',
                                       leading: const Icon(Icons.sms_outlined),
                                       trailing: const NextButton(),
                                       onTap: () => Navigator.of(context).push(
                                         MaterialPageRoute<void>(
-                                          builder: (_) => const NativeSmsPage(),
+                                          builder: (_) => const UnifiedInboxPage(),
                                         ),
                                       ),
                                     ),
