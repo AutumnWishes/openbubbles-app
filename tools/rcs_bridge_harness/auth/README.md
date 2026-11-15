@@ -32,11 +32,14 @@ in. Leave Google Messages for web closed on other computers during this test.
 
 3. Open Firefox's **Developer Tools → Network** (`Option+Command+E` on a Mac),
    then reload the page. Find the request whose address is exactly
-   `https://messages.google.com/web/config`.
+   `https://messages.google.com/web/config` (a trailing `?pli=1` is also accepted).
 4. Right-click that request and select **Copy Value → Copy as cURL**. Firefox
    versions may label it **Copy → Copy as cURL**. Do **not** run the copied cURL
    command or paste it into chat. Stay on this page; do not pair the browser.
-5. In Terminal, run this command. It reads the clipboard only because
+5. In Terminal, type this command manually, or paste it before copying the Firefox
+   request again. Copying the command below replaces the request on your clipboard.
+   After copying the request, switch back to Terminal and press Return on the
+   already-entered command without pasting again. Run this command. It reads the clipboard only because
    `--clipboard` is explicitly selected:
 
    ```sh

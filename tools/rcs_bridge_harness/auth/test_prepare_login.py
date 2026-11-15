@@ -27,6 +27,12 @@ def curl_request(cookies=None, url=login.EXPECTED_URL):
 
 
 class ParsingTests(unittest.TestCase):
+    def test_google_login_redirect_suffix(self):
+        self.assertEqual(login.extract_cookies(curl_request(url=login.EXPECTED_URL + "?pli=1")), FAKE_COOKIES)
+        for suffix in ("?pli=2", "?pli=1&other=value", "?pli=1#fragment"):
+            with self.subTest(suffix=suffix), self.assertRaises(login.LoginInputError):
+                login.extract_cookies(curl_request(url=login.EXPECTED_URL + suffix))
+
     def test_header_extracts_only_allowed_names(self):
         source = dict(FAKE_COOKIES, unwanted="must-not-export", **{"__Secure-1PSIDTS": "fake-optional"})
         result = login.extract_cookies(curl_request(source))

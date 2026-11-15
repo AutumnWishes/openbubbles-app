@@ -136,7 +136,7 @@ def extract_cookies(command):
         else:
             urls.append(arg)
         i += 1
-    if urls != [EXPECTED_URL]:
+    if len(urls) != 1 or urls[0] not in (EXPECTED_URL, EXPECTED_URL + "?pli=1"):
         raise LoginInputError("Copy exactly one request to https://messages.google.com/web/config.")
     if len(cookie_strings) != 1:
         raise LoginInputError("The request must contain exactly one Cookie header or --cookie value.")
