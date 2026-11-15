@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package app.openbubbles.rcsprototype
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.provider.Settings
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ClipData
@@ -17,7 +20,11 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.WindowManager
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.view.inputmethod.EditorInfo
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -26,16 +33,19 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.text.DateFormat
+import java.security.MessageDigest
 import java.util.Date
 
 class MainActivity : Activity() {
     private val controller get() = (application as BridgeApplication).controller
     private val observer: () -> Unit = { render() }
+    private val notifications by lazy { BridgeNotifications(this) }
     private lateinit var status: TextView
     private lateinit var challenge: TextView
     private lateinit var openMessagesButton: Button
@@ -57,13 +67,27 @@ class MainActivity : Activity() {
     private lateinit var draft: EditText
     private lateinit var sendButton: Button
     private lateinit var sendNotice: TextView
+    private lateinit var backgroundHint: TextView
+    private lateinit var notificationButton: Button
     private var sims = listOf<JSONObject>()
     private var simSignature = ""
     private var renderedContent = ""
+    private var renderedConversationId: String? = null
+    private var renderedOpenRevision = -1L
+    private var initialScrollConversation: String? = null
+    private data class InboxPosition(val anchor: String? = null, val offset: Int = 0, val scrollY: Int = 0)
+    private var inboxPosition = InboxPosition()
+    private var inboxRestorePending = false
+    private var backCallback: OnBackInvokedCallback? = null
     private var rendering = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        inboxPosition = InboxPosition(
+            savedInstanceState?.getString("inbox_anchor")?.takeIf { it.matches(Regex("[0-9a-f]{64}")) },
+            savedInstanceState?.getInt("inbox_offset") ?: 0,
+            (savedInstanceState?.getInt("inbox_scroll") ?: 0).coerceAtLeast(0),
+        )
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         val root = column().apply { setBackgroundColor(BACKGROUND); setPadding(dp(16), dp(12), dp(16), dp(8)) }
         root.setOnApplyWindowInsetsListener { view, insets ->
@@ -73,7 +97,7 @@ class MainActivity : Activity() {
         }
         val heading = row()
         heading.addView(label("RCS Bridge Test", 22, true), LinearLayout.LayoutParams(0, dp(48), 1f))
-        heading.addView(button("Diagnostics") { copyDiagnostics() }, LinearLayout.LayoutParams(dp(112), dp(48)))
+        heading.addView(button("Settings") { showSettings() }, LinearLayout.LayoutParams(dp(112), dp(48)))
         root.addView(heading)
         status = label("Opening local session…", 14).apply { setPadding(0, dp(4), 0, dp(8)) }
         root.addView(status)
@@ -98,14 +122,14 @@ class MainActivity : Activity() {
         setup.addView(setupHint)
         val pairRow = row()
         importButton = button("Import sign-in file") { selectSignInFile() }
-        pairButton = button("Pair Google Messages") { controller.pair() }
+        pairButton = button("Pair Google Messages") { requestAlertsIfNeeded(); controller.pair() }
         pairRow.addView(importButton, weightedButton())
         pairRow.addView(pairButton, weightedButton())
         setup.addView(pairRow)
         root.addView(setup)
 
         accountRow = row()
-        connectButton = button("Connect") { controller.connect() }
+        connectButton = button("Connect") { requestAlertsIfNeeded(); controller.connect() }
         disconnectButton = button("Disconnect") { controller.disconnect() }
         forgetButton = button("Forget pairing") { confirmForget() }
         accountRow.addView(connectButton, weightedButton())
@@ -137,12 +161,20 @@ class MainActivity : Activity() {
         root.addView(navigation)
 
         items = column()
-        scroll = ScrollView(this).apply { isFillViewport = true; addView(items) }
+        scroll = ScrollView(this).apply {
+            isFillViewport = true
+            // A stable focus target prevents rebuilding inbox rows from asking
+            // ScrollView to reveal an arbitrary newly focused conversation.
+            isFocusableInTouchMode = true
+            descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
+            addView(items)
+        }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         sendNotice = label("", 13).apply { setPadding(0, dp(8), 0, dp(4)) }
         root.addView(sendNotice)
         composer = row()
         draft = EditText(this).apply {
+            id = android.R.id.edit
             hint = "RCS test message"
             setTextColor(FOREGROUND)
             setHintTextColor(SECONDARY)
@@ -168,25 +200,130 @@ class MainActivity : Activity() {
         composer.addView(draft, LinearLayout.LayoutParams(0, -2, 1f))
         composer.addView(sendButton, LinearLayout.LayoutParams(dp(104), dp(52)))
         root.addView(composer)
-        root.addView(label("Foreground test: keep this app open to watch replies. Background notifications are not included.", 12).apply {
+        backgroundHint = label("", 12).apply {
             setTextColor(SECONDARY); setPadding(0, dp(6), 0, 0)
-        })
+        }
+        root.addView(backgroundHint)
+        notificationButton = button("Enable message notifications") {
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+                !getPreferences(MODE_PRIVATE).getBoolean("alertsAsked", false)) {
+                requestAlertsIfNeeded()
+            } else {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+                } else {
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:$packageName")))
+                }
+            }
+        }
+        root.addView(notificationButton)
         setContentView(root)
+        handleNotificationIntent(intent)
     }
 
-    override fun onStart() { super.onStart(); controller.observe(observer) }
-    override fun onStop() { controller.removeObserver(observer); super.onStop() }
+    override fun onStart() {
+        super.onStart()
+        controller.activityStarted()
+        controller.observe(observer)
+    }
+    override fun onStop() {
+        controller.removeObserver(observer)
+        controller.activityStopped()
+        super.onStop()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        captureInboxPosition()
+        // Only a one-way row key and numeric viewport offsets leave memory.
+        outState.putString("inbox_anchor", inboxPosition.anchor)
+        outState.putInt("inbox_offset", inboxPosition.offset)
+        outState.putInt("inbox_scroll", inboxPosition.scrollY)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onDestroy() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            backCallback?.let { onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it) }
+            backCallback = null
+        }
+        super.onDestroy()
+    }
+
+    private fun updateBackNavigation() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (controller.conversation != null && backCallback == null) {
+            val callback = OnBackInvokedCallback { controller.showConversations() }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
+            backCallback = callback
+        } else if (controller.conversation == null) {
+            backCallback?.let { onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it) }
+            backCallback = null
+        }
+    }
+
+    private fun showSettings() {
+        val options = column().apply { setPadding(dp(24), dp(8), dp(24), dp(8)) }
+        options.addView(Switch(this).apply {
+            id = android.R.id.checkbox
+            text = "Show message previews"
+            setTextColor(FOREGROUND)
+            minHeight = dp(48)
+            isChecked = notifications.previewsEnabled
+            setOnCheckedChangeListener { _, enabled -> notifications.previewsEnabled = enabled }
+        })
+        options.addView(label("Include message text in notifications. Android controls what appears on the lock screen.", 14))
+        AlertDialog.Builder(this).setTitle("Settings").setView(options)
+            .setPositiveButton("Done", null)
+            .setNeutralButton("Diagnostics") { _, _ -> copyDiagnostics() }
+            .show()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNotificationIntent(intent)
+    }
+
+    private fun handleNotificationIntent(value: Intent?) {
+        if (value?.action != BridgeNotifications.OPEN_CONVERSATION) return
+        value.getStringExtra(BridgeNotifications.CONVERSATION_ID)?.let { controller.openNotificationConversation(it) }
+        value.removeExtra(BridgeNotifications.CONVERSATION_ID)
+        value.action = null
+    }
+
+    private fun requestAlertsIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            !getPreferences(MODE_PRIVATE).getBoolean("alertsAsked", false)) {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("alertsAsked", true).apply()
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 82)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 82) render()
+    }
 
     override fun onBackPressed() {
         if (controller.conversation != null) controller.showConversations() else super.onBackPressed()
     }
 
     private fun render() {
+        // The controller may already point to a chat while the visible children
+        // are still inbox rows. Capture using the view we actually rendered.
+        captureInboxPosition()
         rendering = true
         val state = controller.snapshot
         val paired = state.optBoolean("paired")
         val ready = state.optBoolean("ready")
         status.text = controller.status
+        val alertsAllowed = notifications.allowed()
+        notificationButton.visibility = if (alertsAllowed) View.GONE else View.VISIBLE
+        backgroundHint.text = when {
+            controller.backgroundActive && alertsAllowed -> "Background connection active. You can leave the app; Disconnect stops it."
+            controller.backgroundActive -> "Background connection active. Allow notifications to receive message alerts."
+            else -> "Connect to run in background. After a restart or Android Stop, reopen and Connect."
+        }
         challenge.text = if (controller.challenge.isNotEmpty()) "Match this symbol in Google Messages:\n${controller.challenge}" else ""
         challenge.visibility = if (controller.challenge.isNotEmpty() && !ready) View.VISIBLE else View.GONE
         openMessagesButton.visibility = challenge.visibility
@@ -195,12 +332,14 @@ class MainActivity : Activity() {
         importButton.isEnabled = controller.available && !controller.busy && !paired
         pairButton.isEnabled = controller.available && !controller.busy && controller.cookiesImported
         connectButton.isEnabled = controller.available && paired && !ready && !controller.busy
-        disconnectButton.isEnabled = controller.available && (ready || state.optString("state") in setOf("pairing", "connecting", "awaiting_confirmation"))
+        disconnectButton.isEnabled = controller.available && (controller.backgroundRequested || controller.backgroundActive || ready || state.optString("state") in setOf("pairing", "connecting", "awaiting_confirmation"))
         forgetButton.isEnabled = true
         accountRow.visibility = if (controller.conversation == null) View.VISIBLE else View.GONE
-        refreshButton.isEnabled = ready && !controller.busy
+        refreshButton.isEnabled = ready && !controller.busy && !controller.refreshing
+        refreshButton.text = if (controller.refreshing) "Loading…" else "Refresh"
         backButton.visibility = if (controller.conversation == null) View.GONE else View.VISIBLE
         backButton.isEnabled = !controller.busy
+        updateBackNavigation()
 
         val available = state.optJSONArray("sims")
         val signature = available?.toString().orEmpty()
@@ -220,15 +359,45 @@ class MainActivity : Activity() {
             simSpinner.setSelection(selected + 1, false)
             if (selected < 0) controller.selectedSimId = ""
         }
-        simSpinner.isEnabled = ready && !controller.busy
+        simSpinner.isEnabled = paired && sims.isNotEmpty() && !controller.busy
         title.text = controller.conversation?.optString("name")?.ifBlank { "Conversation" } ?: "Recent conversations"
-        val contentKey = "${controller.conversation?.optString("id").orEmpty()}|${controller.conversations}|${controller.messages}"
+        val visibleData = if (controller.conversation == null) controller.conversations else controller.messages
+        val conversationId = controller.conversation?.optString("id")
+        val openRevision = controller.conversationOpenRevision
+        if (renderedOpenRevision != openRevision) {
+            renderedOpenRevision = openRevision
+            initialScrollConversation = conversationId
+        }
+        val contentKey = "$openRevision|${conversationId.orEmpty()}|$visibleData"
         if (contentKey != renderedContent) {
-            val changedConversation = renderedContent.substringBefore('|') != controller.conversation?.optString("id").orEmpty()
             renderedContent = contentKey
+            val previousScroll = scroll.scrollY
+            renderedConversationId = conversationId
+            inboxRestorePending = conversationId == null
             items.removeAllViews()
             if (controller.conversation == null) showConversationItems() else showMessageItems()
-            if (changedConversation && controller.conversation != null) scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+            if (conversationId == null) scroll.requestFocus()
+            // Opening a chat first renders an empty placeholder. Wait for its
+            // actual history before scrolling to the newest message once.
+            val firstHistory = conversationId != null && initialScrollConversation == conversationId && controller.messages.length() > 0
+            // Pre-draw runs after measuring the new history, even when a
+            // notification resumes the same Activity from the background.
+            scroll.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    if (scroll.viewTreeObserver.isAlive) scroll.viewTreeObserver.removeOnPreDrawListener(this)
+                    if (renderedContent == contentKey && controller.conversationOpenRevision == openRevision) {
+                        if (conversationId == null) {
+                            restoreInboxPosition()
+                            inboxRestorePending = false
+                            captureInboxPosition()
+                        } else if (firstHistory) {
+                            scroll.scrollTo(0, items.height)
+                            initialScrollConversation = null
+                        } else scroll.scrollTo(0, previousScroll)
+                    }
+                    return true
+                }
+            })
         }
         composer.visibility = if (controller.conversation != null) View.VISIBLE else View.GONE
         if (draft.text.toString() != controller.draft) {
@@ -250,6 +419,30 @@ class MainActivity : Activity() {
         updateSendButton()
     }
 
+    private fun captureInboxPosition() {
+        if (!::scroll.isInitialized || renderedContent.isEmpty() || renderedConversationId != null || inboxRestorePending) return
+        for (index in 0 until items.childCount) {
+            val row = items.getChildAt(index)
+            val id = (row.tag as? String)?.takeIf { it.isNotEmpty() } ?: continue
+            if (row.bottom > scroll.scrollY) {
+                inboxPosition = InboxPosition(inboxRowKey(id), row.top - scroll.scrollY, scroll.scrollY)
+                return
+            }
+        }
+        // An empty/loading placeholder must not erase the last useful position.
+    }
+
+    private fun restoreInboxPosition() {
+        val anchorRow = (0 until items.childCount).asSequence().map { items.getChildAt(it) }
+            .firstOrNull { row -> (row.tag as? String)?.let { inboxRowKey(it) } == inboxPosition.anchor && row.tag != null }
+        val target = anchorRow?.let { it.top - inboxPosition.offset } ?: inboxPosition.scrollY
+        // ScrollView clamps if an anchor was removed or the inbox became shorter.
+        scroll.scrollTo(0, target.coerceAtLeast(0))
+    }
+
+    private fun inboxRowKey(id: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(id.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
     private fun updateSendButton() {
         if (!::sendButton.isInitialized) return
         val sim = sims.firstOrNull { it.optString("id") == controller.selectedSimId }
@@ -267,6 +460,7 @@ class MainActivity : Activity() {
         for (index in 0 until chats.length()) {
             val chat = chats.optJSONObject(index) ?: continue
             val card = column().apply {
+                tag = chat.optString("id")
                 setPadding(dp(14), dp(12), dp(14), dp(12))
                 background = rounded(CARD)
                 isClickable = true

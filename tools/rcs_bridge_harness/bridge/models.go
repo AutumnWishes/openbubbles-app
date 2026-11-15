@@ -17,14 +17,18 @@ type simView struct {
 	Active     bool   `json:"active"`
 }
 type conversationView struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Preview  string `json:"preview"`
-	RCS      bool   `json:"rcs"`
-	SendMode string `json:"sendMode"`
-	SIMID    string `json:"simId"`
-	ReadOnly bool   `json:"readOnly"`
-	Unread   bool   `json:"unread"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Preview        string   `json:"preview"`
+	RCS            bool     `json:"rcs"`
+	SendMode       string   `json:"sendMode"`
+	SIMID          string   `json:"simId"`
+	ReadOnly       bool     `json:"readOnly"`
+	Unread         bool     `json:"unread"`
+	Addresses      []string `json:"addresses"`
+	LocalAddresses []string `json:"localAddresses"`
+	IsGroup        bool     `json:"isGroup"`
+	TimestampMS    int64    `json:"timestampMs"`
 }
 type messageView struct {
 	ID             string `json:"id"`
@@ -70,7 +74,37 @@ func viewSIM(s *gmproto.SIMCard) simView {
 }
 func viewConversation(c *gmproto.Conversation) conversationView {
 	name := conversationName(c)
-	return conversationView{c.GetConversationID(), name, c.GetLatestMessage().GetDisplayContent(), c.GetType() == gmproto.ConversationType_RCS, strings.TrimPrefix(c.GetSendMode().String(), "SEND_MODE_"), c.GetDefaultOutgoingID(), c.GetReadOnly() || name == "", c.GetUnread()}
+	peers, local := make([]string, 0), make([]string, 0)
+	for _, p := range c.GetParticipants() {
+		address := strings.TrimSpace(p.GetID().GetNumber())
+		if address == "" {
+			continue
+		}
+		if p.GetIsMe() {
+			local = append(local, address)
+		} else {
+			peers = append(peers, address)
+		}
+	}
+	if number := strings.TrimSpace(c.GetSimCard().GetSIMData().GetInternationalPhoneNumber()); number != "" {
+		local = append(local, number)
+	}
+	return conversationView{ID: c.GetConversationID(), Name: name, Preview: c.GetLatestMessage().GetDisplayContent(), RCS: c.GetType() == gmproto.ConversationType_RCS,
+		SendMode: strings.TrimPrefix(c.GetSendMode().String(), "SEND_MODE_"), SIMID: c.GetDefaultOutgoingID(), ReadOnly: c.GetReadOnly() || name == "", Unread: c.GetUnread(),
+		Addresses: uniqueAddresses(peers), LocalAddresses: uniqueAddresses(local), IsGroup: c.GetIsGroupChat() || len(uniqueAddresses(peers)) > 1, TimestampMS: c.GetLastMessageTimestamp() / 1000}
+}
+
+func uniqueAddresses(input []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(input))
+	for _, address := range input {
+		if !seen[address] {
+			result = append(result, address)
+			seen[address] = true
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 func conversationName(c *gmproto.Conversation) string {
 	if name := strings.TrimSpace(c.GetName()); name != "" {

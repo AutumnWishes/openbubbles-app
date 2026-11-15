@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:bluebubbles/app/layouts/unified_inbox/rcs_app_scope.dart';
 
 import 'package:bluebubbles/app/layouts/chat_creator/chat_creator.dart';
 import 'package:bluebubbles/app/layouts/conversation_list/widgets/conversation_list_fab.dart';
@@ -121,7 +122,7 @@ class ConversationListController extends StatefulController {
 }
 
 class ConversationList extends CustomStateful<ConversationListController> {
-  ConversationList({super.key, required bool showArchivedChats, required bool showUnknownSenders, showDeletedMessages = false})
+  ConversationList({super.key, this.includePhoneMessages = true, required bool showArchivedChats, required bool showUnknownSenders, showDeletedMessages = false})
       : super(
             parentController: Get.put(
                 ConversationListController(
@@ -136,6 +137,8 @@ class ConversationList extends CustomStateful<ConversationListController> {
                         : showDeletedMessages
                             ? "Recently Deleted"
                             : "Messages"));
+
+  final bool includePhoneMessages;
 
   @override
   State<StatefulWidget> createState() => _ConversationListState();
@@ -206,7 +209,7 @@ class _ConversationListState extends CustomState<ConversationList, void, Convers
 
     if (controller.showArchivedChats || controller.showUnknownSenders || controller.showDeletedMessages) return child;
 
-    return AnnotatedRegion<SystemUiOverlayStyle>(
+    return UnifiedInboxGate(enabled: widget.includePhoneMessages, child: AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle(
         systemNavigationBarColor: ss.settings.immersiveMode.value ? Colors.transparent : context.theme.colorScheme.background, // navigation bar color
         systemNavigationBarIconBrightness: brightness,
@@ -291,6 +294,6 @@ class _ConversationListState extends CustomState<ConversationList, void, Convers
           },
         ),
       ),
-    );
+    ));
   }
 }

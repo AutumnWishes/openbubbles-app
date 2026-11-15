@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Package bridge exposes a deliberately small, foreground-only Google Messages
-// linked-device experiment to gomobile. It never sends without an explicit Send.
+// Package bridge exposes a deliberately small Google Messages linked-device
+// experiment to gomobile. Sends and read receipts require explicit user actions.
 package bridge
 
 import (
@@ -37,12 +37,13 @@ type Listener interface {
 }
 
 // wire limits the network capabilities used by the harness and permits offline
-// tests. No mark-read, typing, deletion, conversation creation or SMS fallback.
+// tests. No typing, deletion, conversation creation or SMS fallback.
 type wire interface {
 	ListConversations(context.Context, *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error)
 	GetConversation(context.Context, string) (*gmproto.Conversation, error)
 	FetchMessages(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error)
 	SendMessage(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
+	MarkRead(context.Context, string, string) error
 	IsBugleDefault(context.Context) (*gmproto.IsBugleDefaultResponse, error)
 	Disconnect()
 }
@@ -72,6 +73,9 @@ type Client struct {
 	generation                  uint64
 	state, lastError, challenge string
 	ready                       bool
+	readinessEpoch              uint64
+	readinessPending            bool
+	readinessCheck              string
 	storageFailed               bool
 	sims                        map[string]*gmproto.SIMCard
 	journal                     map[string]journalEntry
@@ -121,8 +125,9 @@ func (c *Client) setState(state, message string) {
 	if state != "awaiting_confirmation" {
 		c.challenge = ""
 	}
+	check := c.readinessCheck
 	c.mu.Unlock()
-	c.emit(map[string]any{"type": "state", "state": state, "message": message})
+	c.emit(map[string]any{"type": "state", "state": state, "message": message, "readinessCheck": check})
 }
 func (c *Client) current(gen uint64) bool {
 	c.mu.Lock()
@@ -273,8 +278,11 @@ func (c *Client) Pair(cookiesJSON string) error {
 	if !c.current(gen) {
 		return errors.New("CANCELLED: connection cancelled; pairing was saved")
 	}
+	// Use a fresh client and event generation: queued pairing events and its
+	// cancelled context must not affect the saved-session connection.
+	n, base, gen = c.start(a, true)
 	c.setState("connecting", "Pairing saved. Connecting to the phone.")
-	if err = n.Reconnect(base); err != nil {
+	if err = n.Connect(base); err != nil {
 		c.Disconnect()
 		c.setState("offline", "Pairing saved, but the phone could not reconnect.")
 		return c.fail("CONNECT_FAILED", "Pairing was saved. Use Connect to retry the phone connection.")
@@ -303,7 +311,7 @@ func pairError(err error) (string, string) {
 }
 
 // Connect resumes a saved pairing. Ready is reported only after the phone's
-// initial update event, not merely after starting an HTTP connection.
+// successful phone RPC, not merely after starting an HTTP connection.
 func (c *Client) Connect() error {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
@@ -345,6 +353,9 @@ func (c *Client) Disconnect() {
 	c.ctx = nil
 	c.generation++
 	c.ready = false
+	c.readinessEpoch++
+	c.readinessPending = false
+	c.readinessCheck = "not_started"
 	c.state = "disconnected"
 	c.challenge = ""
 	c.mu.Unlock()
@@ -423,7 +434,7 @@ func (c *Client) Snapshot() string {
 		hasUncertain = hasUncertain || blocksSend(e)
 	}
 	sortSends(sends)
-	return encode(map[string]any{"state": c.state, "paired": validAuth(c.auth), "ready": c.ready, "sims": sims, "lastError": c.lastError, "challenge": c.challenge, "sends": sends, "hasUncertainSend": hasUncertain})
+	return encode(map[string]any{"state": c.state, "paired": validAuth(c.auth), "ready": c.ready, "readinessCheck": c.readinessCheck, "sims": sims, "lastError": c.lastError, "challenge": c.challenge, "sends": sends, "hasUncertainSend": hasUncertain})
 }
 func (c *Client) connection() (wire, context.Context, uint64, error) {
 	c.mu.Lock()
@@ -503,14 +514,26 @@ func validID(v string) bool { return v != "" && len(v) <= 512 && !strings.Contai
 func (c *Client) Send(conversationID, simID, text, requestID string) (string, error) {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
-	if !validID(conversationID) || !validID(simID) || strings.TrimSpace(text) == "" || len(text) > 16*1024 || !utf8.ValidString(text) {
+	return c.send(conversationID, simID, text, requestID, false)
+}
+
+// Reply performs one explicit notification reply using the conversation's current
+// linked-phone sender SIM. It never falls back to the Activity's selected SIM.
+// A duplicate request retains its journaled route, even if the phone's default
+// changed, and returns the original result without transmitting again.
+func (c *Client) Reply(conversationID, text, requestID string) (string, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+	return c.send(conversationID, "", text, requestID, true)
+}
+
+func (c *Client) send(conversationID, simID, text, requestID string, reply bool) (string, error) {
+	if !validID(conversationID) || (!reply && !validID(simID)) || strings.TrimSpace(text) == "" || len(text) > 16*1024 || !utf8.ValidString(text) {
 		return "", c.fail("INVALID_SEND", "Choose a conversation and SIM, and enter up to 16 KB of text.")
 	}
 	if _, err := uuid.Parse(requestID); err != nil {
 		return "", c.fail("INVALID_REQUEST_ID", "A new send requires a valid request ID.")
 	}
-	h := sha256.Sum256([]byte(encode([]string{conversationID, simID, text})))
-	hash := hex.EncodeToString(h[:])
 	c.mu.Lock()
 	previous, exists := c.journal[requestID]
 	blocked := c.storageFailed
@@ -520,7 +543,10 @@ func (c *Client) Send(conversationID, simID, text, requestID string) (string, er
 	full := len(c.journal) >= maxJournal
 	c.mu.Unlock()
 	if exists {
-		if previous.Hash != hash {
+		if reply {
+			simID = previous.SIMID
+		}
+		if previous.Hash != sendHash(conversationID, simID, text) {
 			return "", c.fail("REQUEST_ID_REUSED", "This request ID already belongs to another message.")
 		}
 		return encode(previous.sendView), nil
@@ -544,6 +570,12 @@ func (c *Client) Send(conversationID, simID, text, requestID string) (string, er
 	if conv == nil || conv.GetConversationID() != conversationID || conv.GetType() != gmproto.ConversationType_RCS || conv.GetSendMode() != gmproto.ConversationSendMode_SEND_MODE_AUTO || conv.GetReadOnly() || conv.GetStatus() != gmproto.ConversationStatus_ACTIVE || conversationName(conv) == "" {
 		return "", c.fail("RCS_REQUIRED", "This conversation is not currently an active RCS conversation. Nothing was sent.")
 	}
+	if reply {
+		simID = conv.GetDefaultOutgoingID()
+		if !validID(simID) {
+			return "", c.fail("REPLY_SIM_UNAVAILABLE", "This conversation has no confirmed reply SIM. Open the app and choose a SIM. Nothing was sent.")
+		}
+	}
 	defaultApp, err := n.IsBugleDefault(ctx)
 	if err != nil || !defaultApp.GetSuccess() {
 		return "", c.fail("GOOGLE_MESSAGES_REQUIRED", "Keep Google Messages as the phone's default SMS app for this RCS test.")
@@ -560,7 +592,7 @@ func (c *Client) Send(conversationID, simID, text, requestID string) (string, er
 	if !c.current(gen) || ctx.Err() != nil {
 		return "", c.fail("CANCELLED", "Send cancelled before submission.")
 	}
-	entry := journalEntry{sendView: sendView{RequestID: requestID, ConversationID: conversationID, SIMID: simID, Status: "submitting", Protocol: "unconfirmed", Message: "Submitting one RCS-only attempt."}, Hash: hash}
+	entry := journalEntry{sendView: sendView{RequestID: requestID, ConversationID: conversationID, SIMID: simID, Status: "submitting", Protocol: "unconfirmed", Message: "Submitting one RCS-only attempt."}, Hash: sendHash(conversationID, simID, text)}
 	c.mu.Lock()
 	c.journal[requestID] = entry
 	c.mu.Unlock()
@@ -587,6 +619,57 @@ func (c *Client) Send(conversationID, simID, text, requestID string) (string, er
 		return c.finishSend(requestID, "unknown", "Google Messages returned an unrecognized result. Check the conversation before sending again."), nil
 	}
 }
+func sendHash(conversationID, simID, text string) string {
+	h := sha256.Sum256([]byte(encode([]string{conversationID, simID, text})))
+	return hex.EncodeToString(h[:])
+}
+
+// MarkRead explicitly marks through the notification's original incoming RCS
+// message. Reading history or opening a chat never calls this method. If the
+// marker is no longer in recent history, do not substitute a newer message.
+func (c *Client) MarkRead(conversationID, messageID string) error {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+	if !validID(conversationID) || !validID(messageID) {
+		return c.fail("INVALID_READ_TARGET", "This notification has no valid read target. Open the conversation instead.")
+	}
+	n, base, gen, err := c.connection()
+	if err != nil {
+		return c.fail("NOT_READY", "Wait for the linked phone to be ready.")
+	}
+	ctx, cancel := context.WithTimeout(base, operationTimeout)
+	defer cancel()
+	conv, err := n.GetConversation(ctx, conversationID)
+	if err != nil || conv == nil || conv.GetConversationID() != conversationID || conv.GetType() != gmproto.ConversationType_RCS {
+		return c.fail("READ_CHECK_FAILED", "Could not verify this RCS conversation. Nothing was marked read.")
+	}
+	resp, err := n.FetchMessages(ctx, conversationID, 50, nil)
+	if err != nil {
+		return c.fail("READ_CHECK_FAILED", "Could not verify this notification's message. Nothing was marked read.")
+	}
+	found := false
+	for _, message := range resp.GetMessages() {
+		if message == nil || message.GetMessageID() != messageID || message.GetConversationID() != conversationID {
+			continue
+		}
+		view := viewMessage(message, true)
+		if view.Protocol == "RCS" && !view.Outgoing && (view.StatusCode == 100 || view.StatusCode == 108 || view.StatusCode == 109) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return c.fail("READ_TARGET_UNAVAILABLE", "This notification's message is no longer available. Open the conversation instead.")
+	}
+	if !c.current(gen) || ctx.Err() != nil {
+		return c.fail("CANCELLED", "Mark as read cancelled before submission.")
+	}
+	if err = n.MarkRead(ctx, conversationID, messageID); err != nil || !c.current(gen) || ctx.Err() != nil {
+		return c.fail("READ_UNCONFIRMED", "Could not confirm mark as read. Check Google Messages; no automatic retry.")
+	}
+	return nil
+}
+
 func (c *Client) finishSend(id, status, message string) string {
 	c.mu.Lock()
 	e := c.journal[id]
@@ -600,7 +683,7 @@ func (c *Client) finishSend(id, status, message string) string {
 	if !c.persist() {
 		c.fail("STORAGE_FAILED", "The latest send status could not be saved. Check Google Messages before another attempt.")
 	}
-	c.emit(map[string]any{"type": "send", "requestId": e.RequestID, "status": e.Status, "protocol": e.Protocol, "message": e.Message})
+	c.emit(map[string]any{"type": "send", "requestId": e.RequestID, "conversationId": e.ConversationID, "status": e.Status, "protocol": e.Protocol, "message": e.Message})
 	return encode(e.sendView)
 }
 func (c *Client) observe(v messageView) {
@@ -613,6 +696,7 @@ func (c *Client) observe(v messageView) {
 		c.mu.Unlock()
 		return
 	}
+	previous := e
 	status := observedStatus(v.StatusCode)
 	// Delayed history updates must not downgrade delivered/read to sent.
 	rank := map[string]int{"sent": 1, "delivered": 2, "read": 3}
@@ -633,12 +717,19 @@ func (c *Client) observe(v messageView) {
 		e.Mismatch = true
 		e.Message = "SIM mismatch: the phone reported a different sender SIM. Stop the test and inspect Google Messages."
 	}
+	// History reads also pass through observe. Only a material journal change
+	// should produce a send event: otherwise that event requests another history
+	// refresh, which observes the same message and repeats forever.
+	if e == previous {
+		c.mu.Unlock()
+		return
+	}
 	c.journal[v.RequestID] = e
 	c.mu.Unlock()
 	if !c.persist() {
 		c.fail("STORAGE_FAILED", "Could not save an observed message status. Check Google Messages before sending again.")
 	}
-	c.emit(map[string]any{"type": "send", "requestId": e.RequestID, "status": e.Status, "protocol": e.Protocol, "message": e.Message, "simId": e.SIMID, "actualSimId": e.ActualSIMID})
+	c.emit(map[string]any{"type": "send", "requestId": e.RequestID, "conversationId": e.ConversationID, "status": e.Status, "protocol": e.Protocol, "message": e.Message, "simId": e.SIMID, "actualSimId": e.ActualSIMID})
 }
 
 func (c *Client) handleEvent(q queuedEvent) {
@@ -649,29 +740,28 @@ func (c *Client) handleEvent(q queuedEvent) {
 	}
 	switch e := q.value.(type) {
 	case *events.ClientReady:
-		c.mu.Lock()
-		paired := validAuth(c.auth)
-		c.mu.Unlock()
-		if paired {
-			c.setState("ready", "Linked phone is ready.")
-		}
+		c.checkReadiness()
 	case *events.AuthTokenRefreshed:
 		c.mu.Lock()
 		paired := validAuth(c.auth)
 		c.mu.Unlock()
 		if paired && !c.persist() {
+			c.invalidateReadiness()
 			c.setState("error", "Secure session storage failed.")
 			c.fail("STORAGE_FAILED", "Could not save renewed pairing keys. Reconnect after checking storage.")
 		}
 	case *events.GaiaLoggedOut:
+		c.invalidateReadiness()
 		c.setState("reauth_required", "Google Messages signed out this linked device.")
 	case *events.ListenFatalError:
+		c.invalidateReadiness()
 		c.setState("error", "The linked-device connection stopped.")
 		c.fail("CONNECTION_FAILED", "The Google Messages connection stopped. Reconnect or renew pairing.")
 	case *events.ListenTemporaryError, *events.PhoneNotResponding, *events.PingFailed:
+		c.invalidateReadiness()
 		c.setState("offline", "Waiting for the linked phone to reconnect.")
 	case *events.ListenRecovered, *events.PhoneRespondingAgain:
-		c.setState("connecting", "Phone connection recovered; refresh or reconnect if it does not become ready.")
+		c.checkReadiness()
 	case *gmproto.Settings:
 		c.mu.Lock()
 		if e.SIMCards != nil {
@@ -689,6 +779,9 @@ func (c *Client) handleEvent(q queuedEvent) {
 		c.mu.Unlock()
 		sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
 		c.emit(map[string]any{"type": "settings", "sims": views})
+		// The pinned libgm emits Settings, but never emits ClientReady.
+		// Settings can be cached, so verify a live phone response before ready.
+		c.checkReadiness()
 	case *gmproto.Conversation:
 		c.emit(map[string]any{"type": "conversation", "conversation": viewConversation(e)})
 	case *libgm.WrappedMessage:
@@ -698,4 +791,52 @@ func (c *Client) handleEvent(q queuedEvent) {
 			c.emit(map[string]any{"type": "message", "message": v})
 		}
 	}
+}
+
+// Called with eventMu held. A delayed RPC result must not undo a newer outage.
+func (c *Client) invalidateReadiness() {
+	c.mu.Lock()
+	c.readinessEpoch++
+	c.readinessPending = false
+	c.readinessCheck = "not_started"
+	c.mu.Unlock()
+}
+
+// Called with eventMu held; never block libgm's event consumer on a phone RPC.
+// A server reconnect or cached settings is not itself proof of phone readiness.
+func (c *Client) checkReadiness() {
+	c.mu.Lock()
+	if c.ready || c.readinessPending || !validAuth(c.auth) || c.network == nil || c.ctx == nil || c.ctx.Err() != nil || (c.state != "connecting" && c.state != "offline") {
+		c.mu.Unlock()
+		return
+	}
+	n, base, gen, epoch := c.network, c.ctx, c.generation, c.readinessEpoch
+	c.readinessPending = true
+	c.readinessCheck = "checking"
+	c.mu.Unlock()
+	c.setState("connecting", "Checking the linked phone connection.")
+	go func() {
+		ctx, cancel := context.WithTimeout(base, operationTimeout)
+		defer cancel()
+		response, err := n.IsBugleDefault(ctx)
+		c.eventMu.Lock()
+		defer c.eventMu.Unlock()
+		c.mu.Lock()
+		if c.generation != gen || c.readinessEpoch != epoch || base.Err() != nil {
+			c.mu.Unlock()
+			return
+		}
+		c.readinessPending = false
+		if err != nil || response == nil || !response.GetSuccess() {
+			c.readinessCheck = "failed"
+			c.mu.Unlock()
+			c.setState("offline", "Phone readiness check failed. Use Connect to retry the saved pairing.")
+			c.fail("READY_CHECK_FAILED", "Could not confirm Google Messages is responding as the default messaging app. Check it on the phone, then use Connect; do not forget pairing.")
+			return
+		}
+		c.readinessCheck = "confirmed"
+		c.lastError = ""
+		c.mu.Unlock()
+		c.setState("ready", "Linked phone is ready.")
+	}()
 }

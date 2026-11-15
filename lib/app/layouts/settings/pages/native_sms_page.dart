@@ -24,7 +24,7 @@ class NativeSmsPage extends StatefulWidget {
 
 class _NativeSmsPageState extends State<NativeSmsPage>
     with WidgetsBindingObserver {
-  final NativeSmsService _sms = NativeSmsService();
+  final NativeSmsService _sms = NativeSmsService.instance;
   bool _openingAccess = false;
   bool _openedInitial = false;
 
@@ -134,7 +134,6 @@ class _NativeSmsPageState extends State<NativeSmsPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _sms.dispose();
     super.dispose();
   }
 

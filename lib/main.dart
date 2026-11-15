@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:bluebubbles/app/layouts/unified_inbox/rcs_app_scope.dart';
 import 'dart:isolate';
 import 'dart:math';
 import 'dart:ui';
@@ -418,7 +419,7 @@ class Main extends StatelessWidget {
                         ),
                       );
                     },
-                    child: child ?? Container(),
+                    child: RcsAppScope(child: child ?? Container()),
                   ),
                 );
               },

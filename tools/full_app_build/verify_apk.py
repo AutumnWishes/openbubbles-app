@@ -2,6 +2,7 @@
 """Inspect an experimental APK without installing or executing it."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,125 @@ import struct
 import subprocess
 import sys
 import zipfile
+
+
+RCS_ALPHA_PACKAGE = 'com.bluebubbles.messaging.rcsalpha'
+RCS_SERVICE = 'com.bluebubbles.messaging.services.rcs.RcsBridgeService'
+RCS_CLASSES = (RCS_SERVICE, 'com.bluebubbles.messaging.services.rcs.NativeRcsPlugin')
+
+
+def dex_defined_classes(data):
+    """Read class definitions, rather than accepting unused DEX string references."""
+    if len(data) < 112 or not data.startswith(b'dex\n'):
+        raise ValueError('Invalid DEX header')
+    if struct.unpack_from('<I', data, 40)[0] != 0x12345678:
+        raise ValueError('Unsupported DEX byte order')
+    string_count, strings, type_count, types = struct.unpack_from('<IIII', data, 56)
+    class_count, classes = struct.unpack_from('<II', data, 96)
+    for count, offset, width in ((string_count, strings, 4), (type_count, types, 4),
+                                 (class_count, classes, 32)):
+        if offset + count * width > len(data):
+            raise ValueError('Invalid DEX table bounds')
+    result = set()
+    for index in range(class_count):
+        type_index = struct.unpack_from('<I', data, classes + index * 32)[0]
+        if type_index >= type_count:
+            raise ValueError('Invalid DEX class type')
+        string_index = struct.unpack_from('<I', data, types + type_index * 4)[0]
+        if string_index >= string_count:
+            raise ValueError('Invalid DEX class descriptor')
+        cursor = struct.unpack_from('<I', data, strings + string_index * 4)[0]
+        for _ in range(5):  # Skip the UTF-16 length encoded as ULEB128.
+            if cursor >= len(data):
+                raise ValueError('Truncated DEX class descriptor')
+            byte = data[cursor]
+            cursor += 1
+            if not byte & 0x80:
+                break
+        else:
+            raise ValueError('Invalid DEX string length')
+        end = data.find(b'\0', cursor)
+        if end < 0:
+            raise ValueError('Unterminated DEX class descriptor')
+        result.add(data[cursor:end])
+    return result
+
+
+def manifest_services(xmltree):
+    services = set()
+    element = None
+    for line in xmltree.splitlines():
+        tag = re.match(r'\s*E: (\S+)', line)
+        if tag:
+            element = tag.group(1)
+        elif element == 'service':
+            name = re.search(r'A: (?:http://schemas.android.com/apk/res/)?android:name[^=]*="([^"]+)"', line)
+            if name:
+                services.add(name.group(1))
+    return services
+
+
+def contains_rcs_auth(value):
+    if isinstance(value, dict):
+        sensitive = {'SAPISID', 'HSID', 'SSID', 'APISID', '__Secure-1PSIDTS',
+                     'request_crypto', 'refresh_key', 'tachyon_token', 'web_encryption_key'}
+        if any(key in value and value[key] for key in sensitive):
+            return True
+        return any(contains_rcs_auth(child) for child in value.values())
+    if isinstance(value, list):
+        return any(contains_rcs_auth(child) for child in value)
+    return False
+
+
+def inspect_rcs_archive(archive, xmltree):
+    errors = []
+    names = archive.namelist()
+    if 'lib/arm64-v8a/libgojni.so' not in names:
+        errors.append('RCS alpha is missing the arm64 Google Messages native bridge')
+    if not {RCS_SERVICE, '.services.rcs.RcsBridgeService'} & manifest_services(xmltree):
+        errors.append('RCS alpha is missing its declared background service')
+    definitions = set()
+    for name in names:
+        if re.fullmatch(r'classes(?:\d+)?\.dex', name):
+            definitions.update(dex_defined_classes(archive.read(name)))
+    for name in RCS_CLASSES:
+        descriptor = ('L' + name.replace('.', '/') + ';').encode('ascii')
+        if descriptor not in definitions:
+            errors.append('RCS alpha is missing compiled class ' + name)
+    suspicious = 0
+    for entry in archive.infolist():
+        name = entry.filename
+        lower = name.lower()
+        basename = lower.rsplit('/', 1)[-1]
+        sensitive_name = (lower.endswith(('.curl', '.har', '.keystore', '.jks'))
+                          or basename in {'cookies.txt', 'login.json', 'session.json', 'session.enc',
+                                          'credentials.json', 'credentials.txt'}
+                          or re.search(r'(rcs|bridge|google.?messages).*(login|session|credential).*\.(json|enc|txt)$', basename))
+        if sensitive_name:
+            suspicious += 1
+            continue
+        if not name.startswith(('assets/', 'res/raw/')) or entry.is_dir():
+            continue
+        data = archive.read(entry)
+        # Inspect data assets only. Code contains cookie field names legitimately.
+        if re.search(rb'(?:^|[;\s\x22\x27])SAPISID=[^;\s\x22\x27]+', data):
+            suspicious += 1
+            continue
+        if data.lstrip().startswith((b'{', b'[')):
+            try:
+                value = json.loads(data)
+                contains_auth = contains_rcs_auth(value)
+            except RecursionError:
+                suspicious += 1  # Fail closed when a data asset cannot be inspected.
+                continue
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if contains_auth:
+                suspicious += 1
+    if suspicious:
+        # Do not print the entry names or their potentially sensitive contents.
+        errors.append(f'RCS alpha contains {suspicious} possible login/session assets; remove them before distribution')
+    return errors
 
 
 def elf_load_alignment(data):
@@ -86,6 +206,11 @@ def main():
         if package is None or package.group(1) != args.expected_package:
             actual = package.group(1) if package else 'unreadable'
             raise ValueError(f'Package mismatch: expected {args.expected_package}, found {actual}')
+        manifest = None
+        if args.expected_package == RCS_ALPHA_PACKAGE:
+            manifest = command('aapt2', 'dump', 'xmltree', apk, '--file', 'AndroidManifest.xml')
+            if manifest.returncode:
+                raise ValueError('aapt2 could not inspect RCS alpha component declarations')
 
         signature = command('apksigner', 'verify', '--verbose', '--print-certs', apk)
         report.extend(['', 'Android signature verification:', signature.stdout.strip()])
@@ -106,6 +231,13 @@ def main():
             corrupt_entry = archive.testzip()
             if corrupt_entry is not None:
                 raise ValueError(f'ZIP integrity check failed: {corrupt_entry}')
+            if manifest is not None:
+                rcs_errors = inspect_rcs_archive(archive, manifest.stdout)
+                errors.extend(rcs_errors)
+                report.append('RCS native bridge, compiled plugin and background service: '
+                              + ('PASS' if not rcs_errors else 'FAIL'))
+                report.append('Recognized RCS login/session assets: '
+                              + ('NONE' if not any('login/session' in error for error in rcs_errors) else 'FAIL'))
             libraries = sorted(name for name in archive.namelist()
                                if name.startswith('lib/') and name.endswith('.so'))
             if not libraries:

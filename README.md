@@ -14,13 +14,18 @@ relevant files change. **Run workflow** also allows a manual build.
 
 [Build instructions, current limitations, and validation](docs/native-sms-development.md)
 
-The **Build OpenBubbles SMS Alpha** workflow targets the full app with the same
-SMS screen. Its artifact is **OpenBubbles-SMS-Alpha-arm64-test** and installs as
-**OpenBubbles (Alpha)** alongside the official app. The setup screen offers
-**Use Phone SMS without iMessage setup**. Fresh Apple activation is a separate,
-unverified requirement; a successful APK build does not establish working iMessage.
+The **Build OpenBubbles RCS Alpha** workflow now targets the full app with a
+shared iMessage, local SMS and Google Messages RCS inbox. Its artifact is
+**OpenBubbles-RCS-Alpha-arm64-test** and installs as **OpenBubbles RCS Alpha**
+alongside the official app and the earlier SMS Alpha. The setup screen offers
+**Use SMS and RCS without iMessage setup**. Fresh Apple activation remains a
+separate, unverified requirement; a successful APK build does not establish
+working iMessage. Every installation must pair its own Google Messages account;
+no login JSON, cookies or saved pairing are distributed in source or APKs.
 
-[Full alpha build and phone-test instructions](docs/full-app-alpha.md)
+[RCS Alpha setup, routing rules and current limits](tools/full_app_build/RCS_ALPHA.md)
+
+[Earlier SMS Alpha build and phone-test instructions](docs/full-app-alpha.md)
 
 ## Experimental Google Messages RCS bridge test
 

@@ -2,6 +2,8 @@
 package app.openbubbles.rcsprototype
 
 import android.app.Application
+import android.content.Intent
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import app.openbubbles.rcs.bridge.Bridge
@@ -32,11 +34,25 @@ internal class BridgeController(private val app: Application) {
     private val authLock = Any()
     private val listeners = mutableSetOf<() -> Unit>()
     private val gate = OperationGate()
+    private val backgroundPrefs = app.getSharedPreferences("background_connection", Application.MODE_PRIVATE)
+    private val notifications = BridgeNotifications(app)
+    private var incomingPolicy = IncomingNotificationPolicy()
+    private var visibleActivities = 0
+    private var initialized = false
+    var backgroundActive = false
+        private set
+    val backgroundRequested: Boolean get() = backgroundPrefs.getBoolean("requested", false)
     @Volatile private var client: Client? = null
     private var connectionEnabled = false
     private var importedCookies: String? = null
-    private var refreshScheduled = false
+    private val historyReads = HistoryReadGate()
+    private val refreshEvents = RefreshEventPolicy()
+    private val notificationActions = NotificationActionQueue<NotificationActionRequest>()
+    private var refreshTimer: Runnable? = null
+    val refreshing: Boolean get() = historyReads.inFlight
     private var selectedConversationId: String? = null
+    var conversationOpenRevision = 0L
+        private set
 
     var snapshot = JSONObject().put("state", "disconnected").put("paired", false).put("ready", false)
         private set
@@ -68,12 +84,74 @@ internal class BridgeController(private val app: Application) {
     private var lastSendProtocol = "unconfirmed"
     val available: Boolean get() = client != null
 
-    init { initialize() }
+    init {
+        notifications.recoverInterruptedActions()
+        initialize()
+    }
 
     fun observe(callback: () -> Unit) { listeners.add(callback); callback() }
     fun removeObserver(callback: () -> Unit) { listeners.remove(callback) }
 
     private fun notifyChanged() { listeners.toList().forEach { it() } }
+
+    fun activityStarted() {
+        visibleActivities++
+        if (backgroundRequested && !backgroundActive) ensureBackground()
+        selectedConversationId?.let { notifications.clearConversation(it) }
+        if (snapshot.optBoolean("ready")) scheduleRefresh()
+    }
+
+    fun activityStopped() { visibleActivities = (visibleActivities - 1).coerceAtLeast(0) }
+
+    private fun ensureBackground(): Boolean {
+        if (backgroundActive) return true
+        if (!backgroundPrefs.edit().putBoolean("requested", true).commit()) return false
+        return try {
+            val intent = Intent(app, BridgeService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) app.startForegroundService(intent) else app.startService(intent)
+            true
+        } catch (_: RuntimeException) {
+            backgroundPrefs.edit().putBoolean("requested", false).commit()
+            errorCode = "BACKGROUND_START_FAILED"
+            status = "Could not start background connection. Keep the app visible and tap Connect again."
+            notifyChanged()
+            false
+        }
+    }
+
+    private fun stopBackground() {
+        backgroundPrefs.edit().putBoolean("requested", false).commit()
+        backgroundActive = false
+        app.stopService(Intent(app, BridgeService::class.java))
+        notifications.clearAll()
+    }
+
+    fun backgroundStarted() {
+        backgroundActive = true
+        resumeBackground()
+        notifyChanged()
+    }
+
+    fun backgroundStopped() {
+        backgroundActive = false
+        // If Android destroys only the service, stop the unprotected connection.
+        // Keep the user's request so a sticky restart can restore it.
+        if (connectionEnabled) disconnect(clearBackground = false)
+        notifyChanged()
+    }
+
+    private fun resumeBackground() {
+        if (!initialized || busy || !backgroundActive || !backgroundRequested || connectionEnabled) return
+        if (snapshot.optBoolean("paired")) connect() else stopBackground()
+    }
+
+    fun openNotificationConversation(id: String) {
+        if (id.isBlank() || id.length > 512 || id.any { it == '\r' || it == '\n' || it == '\u0000' }) return
+        // No composing until a fresh lookup returns actual conversation metadata.
+        openConversation(JSONObject().put("id", id).put("name", "Conversation").put("readOnly", true))
+        notifications.clearConversation(id)
+        scheduleRefresh()
+    }
 
     private fun initialize() {
         val token = gate.token()
@@ -107,23 +185,31 @@ internal class BridgeController(private val app: Application) {
                     }
                 })
                 if (!gate.sameSession(token)) { created.disconnect(); return@execute }
-                client = created
                 val initial = JSONObject(created.snapshot())
                 main.post {
                     if (gate.accepts(token)) {
+                        client = created
                         applySnapshot(initial)
+                        initialized = true
                         busy = false
                         status = if (initial.optBoolean("paired")) "Saved pairing is ready. Tap Connect." else "Import your local sign-in file to begin."
                         notifyChanged()
+                        resumeBackground()
+                        pumpNotificationActions()
+                    } else {
+                        controls.execute { created.disconnect() }
                     }
                 }
             } catch (_: Exception) {
                 main.post {
                     if (gate.accepts(token)) {
                         busy = false
+                        initialized = true
+                        stopBackground()
                         errorCode = "LOCAL_SESSION_UNAVAILABLE"
                         status = "Could not open the saved pairing. Use Forget pairing to start again."
                         notifyChanged()
+                        pumpNotificationActions()
                     }
                 }
             }
@@ -169,6 +255,7 @@ internal class BridgeController(private val app: Application) {
     fun pair() {
         if (busy || client == null) return
         val cookies = importedCookies ?: return
+        if (!ensureBackground()) return
         importedCookies = null
         cookiesImported = false
         connectionEnabled = true
@@ -179,11 +266,13 @@ internal class BridgeController(private val app: Application) {
 
     fun connect() {
         if (busy || client == null) return
+        if (!ensureBackground()) return
         connectionEnabled = true
         runOperation("Could not connect. Check that Google Messages and this phone are online.") { it.connect() }
     }
 
     fun showConversations() {
+        conversationOpenRevision++
         selectedConversationId = null
         conversation = null
         messages = JSONArray()
@@ -194,7 +283,9 @@ internal class BridgeController(private val app: Application) {
     }
 
     fun openConversation(item: JSONObject) {
+        conversationOpenRevision++
         selectedConversationId = item.getString("id")
+        notifications.clearConversation(item.getString("id"))
         conversation = item
         messages = JSONArray()
         draft = ""
@@ -203,21 +294,46 @@ internal class BridgeController(private val app: Application) {
         refresh()
     }
 
+    /** Read-only history loading must never lock the composer or other controls. */
     fun refresh() {
-        if (busy || !snapshot.optBoolean("ready")) return
+        if (!snapshot.optBoolean("ready")) return
+        val active = client ?: return
+        val request = historyReads.begin(busy) ?: return
         val id = selectedConversationId
+        val openRevision = conversationOpenRevision
         val token = gate.token()
-        runOperation("Refresh failed. Reconnect and try again.") { active ->
-            val value = JSONObject(if (id == null) active.conversations() else active.messages(id))
+        val readErrorStatus = status.takeIf { errorCode == "REFRESH_FAILED" || errorCode == "LOAD_FAILED" }
+        notifyChanged()
+        worker.execute {
+            val value = try { JSONObject(if (id == null) active.conversations() else active.messages(id)) }
+                catch (_: Exception) { null }
             main.post {
-                if (gate.accepts(token) && client === active && selectedConversationId == id) {
-                    if (id == null) conversations = value.optJSONArray("conversations") ?: JSONArray()
-                    else {
-                        conversation = value.optJSONObject("conversation") ?: conversation
-                        messages = value.optJSONArray("messages") ?: JSONArray()
+                if (!gate.accepts(token) || client !== active || !historyReads.finish(request)) return@post
+                if (selectedConversationId == id && conversationOpenRevision == openRevision) {
+                    if (value != null) {
+                        if (id == null) conversations = value.optJSONArray("conversations") ?: JSONArray()
+                        else {
+                            conversation = value.optJSONObject("conversation") ?: conversation
+                            messages = value.optJSONArray("messages") ?: JSONArray()
+                        }
+                    } else if (errorCode.isEmpty()) {
+                        errorCode = "REFRESH_FAILED"
+                        status = "Could not refresh this conversation. Your draft is kept; try Refresh again."
                     }
-                    notifyChanged()
                 }
+                // Read the current journal/state on this UI turn, not before newer events.
+                try { applySnapshot(JSONObject(active.snapshot())) } catch (_: Exception) { }
+                if (selectedConversationId == id && conversationOpenRevision == openRevision && value != null &&
+                    (errorCode == "REFRESH_FAILED" || errorCode == "LOAD_FAILED")) {
+                    errorCode = ""
+                    // Replace only the old read-failure text, keeping any newer
+                    // connection or send status that arrived during this read.
+                    if (status == readErrorStatus && !busy && snapshot.optBoolean("ready")) {
+                        status = "Connected. Choose a SIM and an existing RCS conversation."
+                    }
+                }
+                notifyChanged()
+                drainRefresh()
             }
         }
     }
@@ -242,7 +358,83 @@ internal class BridgeController(private val app: Application) {
         }
     }
 
-    fun disconnect() {
+    internal fun handleNotificationAction(request: NotificationActionRequest) {
+        when (notificationActions.offer(request.key, request)) {
+            NotificationActionQueue.Offer.DUPLICATE -> return
+            NotificationActionQueue.Offer.FULL -> {
+                notifications.actionFinished(request.conversationId, request.token, request.reply, false)
+                return
+            }
+            NotificationActionQueue.Offer.ACCEPTED -> Unit
+        }
+        notifications.actionProgress(request.conversationId, request.token, request.reply)
+        // Do not persist reply text or silently retry it after a restart.
+        main.postDelayed({
+            notificationActions.expire(request.key)?.let {
+                notifications.actionFinished(it.conversationId, it.token, it.reply, false)
+            }
+        }, 60_000)
+        pumpNotificationActions()
+    }
+
+    private fun pumpNotificationActions() {
+        // A notification action never overrides an explicit Disconnect. During
+        // restoration it can wait for the already-requested connection to resume.
+        if (!backgroundRequested || (initialized && !snapshot.optBoolean("paired"))) {
+            while (true) {
+                val (key, request) = notificationActions.next() ?: break
+                notifications.actionFinished(request.conversationId, request.token, request.reply, false)
+                notificationActions.complete(key)
+            }
+            return
+        }
+        if (!initialized || busy || client == null || !snapshot.optBoolean("ready")) return
+        val (key, request) = notificationActions.next() ?: return
+        val token = gate.token()
+        runOperation("Open the conversation to check the notification action.") { active ->
+            var result: JSONObject? = null
+            var success = false
+            var uncertain = false
+            try {
+                if (request.reply) {
+                    result = JSONObject(active.reply(request.conversationId, request.text, request.token))
+                    success = result.optString("status") in setOf("accepted", "sent", "delivered", "read")
+                    uncertain = result.optString("status") in setOf("unknown", "submitting")
+                } else {
+                    active.markRead(request.conversationId, request.messageId)
+                    success = true
+                }
+            } catch (_: Exception) {
+                // Never report an uncertain native send as definitely unsent.
+                uncertain = request.reply
+            }
+            main.post {
+                if (!gate.accepts(token) || client !== active) return@post
+                result?.let { applySendResult(it) }
+                notifications.actionFinished(request.conversationId, request.token, request.reply, success, uncertain)
+                notificationActions.complete(key)
+                if (success && visibleActivities > 0) scheduleRefresh()
+            }
+        }
+    }
+
+    fun disconnect(clearBackground: Boolean = true) {
+        val cancelledActions = notificationActions.cancel()
+        if (!clearBackground) {
+            for ((request, active) in cancelledActions) {
+                notifications.actionFinished(request.conversationId, request.token, request.reply, false, active && request.reply)
+            }
+        }
+        if (clearBackground) stopBackground()
+        cancelRefresh()
+        // Stop during async session restoration must not invalidate its completion.
+        // The persisted request was cleared, so restoration cannot reconnect.
+        if (!initialized) {
+            connectionEnabled = false
+            importedCookies = null
+            cookiesImported = false
+            return
+        }
         importedCookies = null
         cookiesImported = false
         connectionEnabled = false
@@ -262,11 +454,17 @@ internal class BridgeController(private val app: Application) {
                 challenge = ""
                 status = "Disconnected. The encrypted pairing is kept on this device."
                 notifyChanged()
+                resumeBackground()
             }
         }
     }
 
     fun forget() {
+        notificationActions.cancel(clearHistory = true)
+        stopBackground()
+        cancelRefresh()
+        incomingPolicy = IncomingNotificationPolicy()
+        initialized = false
         importedCookies = null
         cookiesImported = false
         connectionEnabled = false
@@ -326,13 +524,18 @@ internal class BridgeController(private val app: Application) {
                     }
                 }
             }
-            val current = try { JSONObject(active.snapshot()) } catch (_: Exception) { null }
             main.post {
                 if (gate.accepts(token) && client === active) {
+                    // Read on the UI turn: a worker snapshot can arrive after a
+                    // newer ready/offline event and overwrite it with old state.
+                    val current = try { JSONObject(active.snapshot()) } catch (_: Exception) { null }
                     if (current != null) applySnapshot(current)
                     busy = false
                     if (!failed && current?.optBoolean("ready") == true) status = "Connected. Choose a SIM and an existing RCS conversation."
+                    if (failed && !snapshot.optBoolean("paired")) stopBackground()
                     notifyChanged()
+                    pumpNotificationActions()
+                    drainRefresh()
                 }
             }
         }
@@ -364,10 +567,13 @@ internal class BridgeController(private val app: Application) {
         val event = try { JSONObject(raw) } catch (_: Exception) { return }
         when (event.optString("type")) {
             "state" -> {
+                val wasReady = snapshot.optBoolean("ready")
                 snapshot.put("state", event.optString("state"))
                 snapshot.put("ready", event.optString("state") == "ready")
+                snapshot.put("readinessCheck", event.optString("readinessCheck", "not_started"))
                 status = event.optString("message", "Connection state changed.")
-                if (event.optString("state") == "ready") scheduleRefresh()
+                if (event.optString("state") == "ready") errorCode = ""
+                if (event.optString("state") == "ready" && !wasReady && visibleActivities > 0) scheduleRefresh()
             }
             "challenge" -> {
                 challenge = event.optString("value")
@@ -378,10 +584,34 @@ internal class BridgeController(private val app: Application) {
                 errorCode = safeCode(event.optString("code"))
                 status = event.optString("message", "The bridge reported an error.")
             }
-            "send" -> { applySendResult(event); scheduleRefresh() }
-            "conversation", "message" -> scheduleRefresh()
+            "send" -> {
+                applySendResult(event)
+                invalidateFromEvent("send", event.optString("requestId"), event.optString("conversationId"), event)
+            }
+            "message" -> {
+                val message = event.optJSONObject("message")
+                if (message != null) {
+                    val id = message.optString("conversationId")
+                    val eligible = message.optString("protocol") == "RCS" && incomingPolicy.shouldNotify(
+                        message.optString("id"), id, message.optBoolean("outgoing"),
+                        message.optBoolean("old"), message.optInt("statusCode"),
+                        message.optLong("timestampMs"), System.currentTimeMillis())
+                    if (eligible &&
+                        (visibleActivities == 0 || selectedConversationId != id)) {
+                        val chat = if (conversation?.optString("id") == id) conversation
+                            else (0 until conversations.length()).asSequence().mapNotNull { conversations.optJSONObject(it) }
+                                .firstOrNull { it.optString("id") == id }
+                        notifications.incoming(id, message.optString("text"), chat?.optString("name").orEmpty(), message.optString("id"))
+                    }
+                }
+                if (message != null) invalidateFromEvent("message", message.optString("id"), message.optString("conversationId"), message, message.optBoolean("old"))
+            }
+            "conversation" -> event.optJSONObject("conversation")?.let {
+                invalidateFromEvent("conversation", it.optString("id"), it.optString("id"), it)
+            }
         }
         notifyChanged()
+        pumpNotificationActions()
     }
 
     private fun applySendResult(result: JSONObject) {
@@ -411,15 +641,36 @@ internal class BridgeController(private val app: Application) {
         }
     }
 
+    private fun invalidateFromEvent(kind: String, id: String, conversationId: String, value: JSONObject, old: Boolean = false) {
+        // Stable key ordering; the historical/live flag is not a content change.
+        val signature = value.keys().asSequence().filter { it != "old" }.sorted()
+            .joinToString("|") { key -> "$key=${value.opt(key)}" }
+        if (refreshEvents.shouldRefresh(kind, id, conversationId, signature, old, selectedConversationId) && visibleActivities > 0) scheduleRefresh()
+    }
+
     private fun scheduleRefresh() {
-        if (refreshScheduled) return
-        refreshScheduled = true
+        historyReads.request()
+        if (refreshTimer != null) return
         val token = gate.token()
-        main.postDelayed({
-            refreshScheduled = false
-            if (!gate.accepts(token) || !connectionEnabled) return@postDelayed
-            if (busy) scheduleRefresh() else refresh()
-        }, 1000)
+        val task = Runnable {
+            refreshTimer = null
+            if (!gate.accepts(token) || !connectionEnabled || visibleActivities == 0 || !historyReads.pending) return@Runnable
+            if (!busy && !refreshing) refresh()
+            // Completion of the outstanding operation drains one coalesced request.
+        }
+        refreshTimer = task
+        main.postDelayed(task, 1000)
+    }
+
+    private fun drainRefresh() {
+        if (historyReads.pending && !busy && !refreshing && connectionEnabled && visibleActivities > 0 && snapshot.optBoolean("ready")) scheduleRefresh()
+    }
+
+    private fun cancelRefresh() {
+        refreshTimer?.let { main.removeCallbacks(it) }
+        refreshTimer = null
+        historyReads.cancel()
+        refreshEvents.clear()
     }
 
     fun diagnostics(): String {
@@ -435,12 +686,13 @@ internal class BridgeController(private val app: Application) {
             "RCS Bridge Test $version", "Android API ${android.os.Build.VERSION.SDK_INT}",
             "State: ${snapshot.optString("state").takeIf { it in states } ?: "unknown"}",
             "Paired: ${snapshot.optBoolean("paired")}", "Ready: ${snapshot.optBoolean("ready")}",
+            "Phone readiness check: ${snapshot.optString("readinessCheck").takeIf { it in setOf("not_started", "checking", "confirmed", "failed") } ?: "not_started"}",
             "SIM count: ${snapshot.optJSONArray("sims")?.length() ?: 0}",
-            "Conversation count: ${conversations.length()}", "Displayed message count: ${messages.length()}",
+            "History refresh in progress: $refreshing", "Conversation count: ${conversations.length()}", "Displayed message count: ${messages.length()}",
             "Last error code: ${safeCode(errorCode).ifEmpty { "none" }}",
             "Last send: ${lastSendStatus.takeIf { it in statuses } ?: "unknown"}",
             "Observed protocol: ${lastSendProtocol.takeIf { it in protocols } ?: "unknown"}",
-            "Uncertain send: $hasUncertainSend", "Route mismatch: ${stopNotice.isNotEmpty()}", "Mode: foreground proof of concept"
+            "Uncertain send: $hasUncertainSend", "Route mismatch: ${stopNotice.isNotEmpty()}", "Background service: $backgroundActive", "Notifications allowed: ${notifications.allowed()}", "Mode: background connection test"
         ).joinToString("\n")
     }
 

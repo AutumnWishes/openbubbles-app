@@ -93,6 +93,13 @@ android {
             resValue "string", "file_provider", "com.bluebubbles.messaging.alpha.fileprovider"
             applicationId "com.bluebubbles.messaging.alpha"
         }
+        rcsalpha {
+            dimension "app"
+            resValue "string", "app_name_en", "OpenBubbles RCS Alpha"
+            resValue "color", "ic_launcher_background", "#49dbde"
+            resValue "string", "file_provider", "com.bluebubbles.messaging.rcsalpha.fileprovider"
+            applicationId "com.bluebubbles.messaging.rcsalpha"
+        }
         beta {
             dimension "app"
             resValue "string", "app_name_en", "OpenBubbles (Beta)"
@@ -120,6 +127,7 @@ android {
             productFlavors.joel.signingConfig signingConfigs.debug
             productFlavors.tanay.signingConfig signingConfigs.debug
             productFlavors.alpha.signingConfig signingConfigs.debug
+            productFlavors.rcsalpha.signingConfig signingConfigs.debug
             productFlavors.beta.signingConfig signingConfigs.release
             productFlavors.prod.signingConfig signingConfigs.release
             minifyEnabled false
@@ -148,6 +156,9 @@ configurations.all {
 }
 
 dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    // Built from the public pinned Go source before the Flutter APK build.
+    implementation files(rootProject.file('../tools/rcs_bridge_harness/android/app/libs/rcsbridge.aar'))
     // Android native functions
     implementation "androidx.core:core-ktx:1.13.1"
     implementation "androidx.sharetarget:sharetarget:1.2.0"

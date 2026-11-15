@@ -3,22 +3,24 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
-def prototypeBuildNumber = providers.environmentVariable('RCS_BUILD_NUMBER').getOrElse('4001')
+def prototypeBuildNumber = providers.environmentVariable('RCS_BUILD_NUMBER').getOrElse('4007')
 if (!(prototypeBuildNumber ==~ /[1-9][0-9]{0,7}/)) {
     throw new GradleException('RCS_BUILD_NUMBER must be a positive integer of at most eight digits.')
 }
 
 android {
+    testBuildType 'release'
     namespace 'app.openbubbles.rcsprototype'
     compileSdk 36
     ndkVersion '27.2.12479018'
 
     defaultConfig {
         applicationId 'app.openbubbles.rcsprototype'
+        testInstrumentationRunner 'app.openbubbles.rcsprototype.BackgroundSmokeInstrumentation'
         minSdk 24
         targetSdk 36
         versionCode prototypeBuildNumber.toInteger()
-        versionName '0.1.0'
+        versionName '0.2.4'
         ndk {
             abiFilters 'arm64-v8a'
         }

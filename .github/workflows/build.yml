@@ -1,13 +1,32 @@
-name: Build OpenBubbles SMS Alpha
+name: Build OpenBubbles RCS Alpha
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - rustpush
+    paths:
+      - '.github/workflows/build.yml'
+      - 'tools/full_app_build/**'
+      - 'tools/rcs_bridge_harness/**'
+      - 'android/**'
+      - 'lib/**'
+      - 'rust/**'
+      - 'rust_builder/**'
+      - 'rustpush'
+      - 'telephony_plus'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'test/**'
+      - '.env.example'
   push:
     branches:
+      - rustpush
       - feature/full-openbubbles-sms
     paths:
       - '.github/workflows/build.yml'
       - 'tools/full_app_build/**'
+      - 'tools/rcs_bridge_harness/**'
       - 'android/**'
       - 'lib/**'
       - 'rust/**'
@@ -20,7 +39,7 @@ on:
       - '.env.example'
 
 concurrency:
-  group: full-sms-alpha-${{ github.ref }}
+  group: full-rcs-alpha-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -28,13 +47,15 @@ permissions:
 
 jobs:
   android:
-    name: Full OpenBubbles SMS alpha APK
+    name: Full OpenBubbles RCS alpha APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CI: 'true'
       BOT: 'true'
       FLUTTER_SUPPRESS_ANALYTICS: 'true'
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '1'
       CARGO_BUILD_JOBS: '2'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
       GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.workers.max=2'
@@ -50,6 +71,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          cache-dependency-path: tools/rcs_bridge_harness/bridge/go.sum
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+          cache-disabled: true
       - name: Set up pinned Flutter SDK
         run: |
           git clone --depth 1 --branch 3.24.0 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
@@ -97,18 +126,29 @@ jobs:
           key: ${{ runner.os }}-openbubbles-gradle8.9-java21-${{ hashFiles('android/**/*.gradle', 'android/gradle/wrapper/gradle-wrapper.properties', 'pubspec.lock') }}
           restore-keys: ${{ runner.os }}-openbubbles-gradle8.9-java21-
       - name: Select alpha build number
-        run: echo "ALPHA_BUILD_NUMBER=$((3000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+        run: echo "ALPHA_BUILD_NUMBER=$((5000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
       - name: Test and build the complete app
         run: tools/full_app_build/run.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: OpenBubbles-SMS-Alpha-arm64-test
+          name: OpenBubbles-RCS-Alpha-arm64-test
           path: |
-            build/app/outputs/flutter-apk/app-arm64-v8a-alpha-release.apk
+            build/app/outputs/flutter-apk/app-arm64-v8a-rcsalpha-release.apk
             build/app/outputs/flutter-apk/SHA256SUMS.txt
             build/app/outputs/flutter-apk/BUILD.txt
             build/app/outputs/flutter-apk/APK-CHECKS.txt
           if-no-files-found: error
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenBubbles-RCS-Alpha-build-diagnostics
+          path: |
+            build/app/reports/
+            build/app/test-results/
+            tools/rcs_bridge_harness/android/app/build/reports/
+            tools/rcs_bridge_harness/android/app/build/test-results/
+          if-no-files-found: ignore
       # Keep dependency downloads after a failed compilation as well.
       - name: Save Flutter package downloads
         if: ${{ !cancelled() && steps.pub_cache.outputs.cache-hit != 'true' && steps.pub_cache.outputs.cache-primary-key != '' }}

@@ -1,5 +1,5 @@
 import 'package:auto_size_text/auto_size_text.dart';
-import 'package:bluebubbles/app/layouts/settings/pages/native_sms_page.dart';
+import 'package:bluebubbles/app/layouts/unified_inbox/unified_inbox_page.dart';
 import 'package:bluebubbles/app/components/avatars/contact_avatar_widget.dart';
 import 'package:bluebubbles/app/layouts/conversation_list/pages/search/search_view.dart';
 import 'package:bluebubbles/app/layouts/conversation_view/pages/conversation_view.dart';
@@ -135,7 +135,7 @@ class MaterialOverflowMenu extends StatelessWidget {
           goToPasswords(context);
         } else if (value == 12) {
           Navigator.of(context).push(MaterialPageRoute<void>(
-            builder: (_) => const NativeSmsPage(),
+            builder: (_) => const UnifiedInboxPage(),
           ));
         }
       },
@@ -144,7 +144,7 @@ class MaterialOverflowMenu extends StatelessWidget {
           if (!kIsWeb && !ls.isBubble && defaultTargetPlatform == TargetPlatform.android)
             const PopupMenuItem(
               value: 12,
-              child: Text('SMS on this phone'),
+              child: Text('SMS and RCS inbox'),
             ),
           PopupMenuItem(
             value: 0,
@@ -291,10 +291,10 @@ class CupertinoOverflowMenu extends StatelessWidget {
       itemBuilder: (context) => [
         if (!kIsWeb && !ls.isBubble && defaultTargetPlatform == TargetPlatform.android)
           PullDownMenuItem(
-            title: 'SMS on this phone',
+            title: 'SMS and RCS inbox',
             icon: CupertinoIcons.chat_bubble_text,
             onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
-              builder: (_) => const NativeSmsPage(),
+              builder: (_) => const UnifiedInboxPage(),
             )),
           ),
         PullDownMenuHeader(

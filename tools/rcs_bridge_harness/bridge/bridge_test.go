@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -21,6 +22,7 @@ type memoryListener struct {
 	saved  string
 	events []string
 	fail   bool
+	saves  int
 }
 
 func (l *memoryListener) OnEvent(v string) {
@@ -35,6 +37,7 @@ func (l *memoryListener) OnSession(v string) bool {
 		return false
 	}
 	l.saved = v
+	l.saves++
 	return true
 }
 func (l *memoryListener) session() string { l.mu.Lock(); defer l.mu.Unlock(); return l.saved }
@@ -51,15 +54,25 @@ type fakeWire struct {
 	onSend       func(*gmproto.SendMessageRequest)
 	messages     []*gmproto.Message
 	disconnected bool
+	onDefault    func(context.Context) (*gmproto.IsBugleDefaultResponse, error)
+	gets         int
+	reads        [][2]string
+	readErr      error
+	onFetch      func()
+	onRead       func()
 }
 
 func (f *fakeWire) ListConversations(context.Context, *gmproto.ListConversationsRequest) (*gmproto.ListConversationsResponse, error) {
 	return &gmproto.ListConversationsResponse{Conversations: []*gmproto.Conversation{f.conv}}, f.err
 }
 func (f *fakeWire) GetConversation(context.Context, string) (*gmproto.Conversation, error) {
+	f.gets++
 	return f.conv, f.err
 }
 func (f *fakeWire) FetchMessages(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error) {
+	if f.onFetch != nil {
+		f.onFetch()
+	}
 	return &gmproto.ListMessagesResponse{Messages: f.messages}, f.err
 }
 func (f *fakeWire) SendMessage(_ context.Context, r *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error) {
@@ -69,7 +82,17 @@ func (f *fakeWire) SendMessage(_ context.Context, r *gmproto.SendMessageRequest)
 	}
 	return f.response, f.sendErr
 }
-func (f *fakeWire) IsBugleDefault(context.Context) (*gmproto.IsBugleDefaultResponse, error) {
+func (f *fakeWire) MarkRead(_ context.Context, conversationID, messageID string) error {
+	f.reads = append(f.reads, [2]string{conversationID, messageID})
+	if f.onRead != nil {
+		f.onRead()
+	}
+	return f.readErr
+}
+func (f *fakeWire) IsBugleDefault(ctx context.Context) (*gmproto.IsBugleDefaultResponse, error) {
+	if f.onDefault != nil {
+		return f.onDefault(ctx)
+	}
 	return &gmproto.IsBugleDefaultResponse{Success: f.defaultApp}, f.err
 }
 func (f *fakeWire) Disconnect() { f.disconnected = true }
@@ -403,5 +426,250 @@ func TestPinnedPairingPatchRejectsAmbiguousPhoneBeforeSelection(t *testing.T) {
 	}
 	if !strings.Contains(source, "case <-ctx.Done():\n\t\treturn \"\", nil, ctx.Err()") || strings.Contains(source, "longPollConnectWait.Wait()") {
 		t.Fatal("pairing long-poll startup does not honor cancellation")
+	}
+}
+
+func waitState(t *testing.T, c *Client, state string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		got := c.state
+		c.mu.Unlock()
+		if got == state {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("did not reach %s: %s", state, c.Snapshot())
+}
+
+func TestSettingsVerifiesPhoneWithoutClientReadyEvent(t *testing.T) {
+	c, _, _ := fixture(t)
+	c.setState("connecting", "test")
+	c.handleEvent(queuedEvent{c.generation, &gmproto.Settings{}})
+	waitState(t, c, "ready")
+	if _, err := c.Conversations(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(c.Snapshot(), `"readinessCheck":"confirmed"`) {
+		t.Fatal("missing probe evidence")
+	}
+}
+
+func TestRecoveryRechecksPhoneAndAllowsRefresh(t *testing.T) {
+	for _, recovery := range []any{&events.ListenRecovered{}, &events.PhoneRespondingAgain{}} {
+		c, _, _ := fixture(t)
+		c.handleEvent(queuedEvent{c.generation, &events.PhoneNotResponding{}})
+		if _, err := c.Conversations(); err == nil {
+			t.Fatal("offline refresh allowed")
+		}
+		c.handleEvent(queuedEvent{c.generation, recovery})
+		waitState(t, c, "ready")
+		if _, err := c.Conversations(); err != nil {
+			t.Fatal(err)
+		}
+		// Redundant recovery notices must not downgrade an already-ready phone.
+		c.handleEvent(queuedEvent{c.generation, recovery})
+		if !strings.Contains(c.Snapshot(), `"ready":true`) {
+			t.Fatal("recovery downgraded ready")
+		}
+	}
+}
+
+func TestReadinessRequiresSuccessfulDefaultAppResponse(t *testing.T) {
+	for _, response := range []*gmproto.IsBugleDefaultResponse{nil, {Success: false}} {
+		c, f, _ := fixture(t)
+		c.setState("connecting", "test")
+		f.onDefault = func(context.Context) (*gmproto.IsBugleDefaultResponse, error) { return response, nil }
+		c.handleEvent(queuedEvent{c.generation, &gmproto.Settings{}})
+		waitState(t, c, "offline")
+		if _, err := c.Conversations(); err == nil {
+			t.Fatal("false readiness")
+		}
+	}
+	c, f, l := fixture(t)
+	c.setState("connecting", "test")
+	f.onDefault = func(context.Context) (*gmproto.IsBugleDefaultResponse, error) {
+		return nil, errors.New("SECRET response")
+	}
+	c.handleEvent(queuedEvent{c.generation, &gmproto.Settings{}})
+	waitState(t, c, "offline")
+	c.eventMu.Lock()
+	defer c.eventMu.Unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if strings.Contains(strings.Join(l.events, ""), "SECRET") {
+		t.Fatal("raw readiness error leaked")
+	}
+}
+
+func TestDelayedReadinessCannotUndoDisconnectOrNewFailure(t *testing.T) {
+	for _, change := range []string{"disconnect", "outage", "logout", "fatal"} {
+		t.Run(change, func(t *testing.T) {
+			c, f, _ := fixture(t)
+			c.setState("connecting", "test")
+			started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			f.onDefault = func(context.Context) (*gmproto.IsBugleDefaultResponse, error) {
+				close(started)
+				<-release
+				defer close(finished)
+				return &gmproto.IsBugleDefaultResponse{Success: true}, nil
+			}
+			c.handleEvent(queuedEvent{c.generation, &gmproto.Settings{}})
+			<-started
+			want := "offline"
+			switch change {
+			case "disconnect":
+				c.Disconnect()
+				want = "disconnected"
+			case "outage":
+				c.handleEvent(queuedEvent{c.generation, &events.PhoneNotResponding{}})
+			case "logout":
+				c.handleEvent(queuedEvent{c.generation, &events.GaiaLoggedOut{}})
+				want = "reauth_required"
+			case "fatal":
+				c.handleEvent(queuedEvent{c.generation, &events.ListenFatalError{}})
+				want = "error"
+			}
+			close(release)
+			<-finished
+			// Take the event lock after the RPC returns, then allow its completion turn.
+			time.Sleep(10 * time.Millisecond)
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.ready || c.state != want {
+				t.Fatal("stale check restored readiness")
+			}
+		})
+	}
+}
+
+// Counts effects, not rendered history, so a fetch/observe/refresh feedback loop
+// cannot pass merely because it returns the same messages to the caller.
+func (l *memoryListener) sendEffects(t *testing.T) (events, saves int) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, raw := range l.events {
+		var event struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(raw), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "send" {
+			events++
+		}
+	}
+	return events, l.saves
+}
+
+func TestRepeatedHistoryDoesNotTriggerAnotherSendRefresh(t *testing.T) {
+	c, f, l := fixture(t)
+	id := uuid.NewString()
+	if _, err := c.Send("conversation", "personal", "hello", id); err != nil {
+		t.Fatal(err)
+	}
+	message := &gmproto.Message{MessageID: "message", TmpID: id, ConversationID: "conversation",
+		ParticipantID: "personal", Timestamp: 1234567000, Type: 4,
+		MessageStatus: &gmproto.MessageStatus{Status: gmproto.MessageStatusType_OUTGOING_DELIVERED}}
+	f.messages = []*gmproto.Message{message}
+	beforeEvents, beforeSaves := l.sendEffects(t)
+	first, err := c.Messages("conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, saves := l.sendEffects(t)
+	if events != beforeEvents+1 || saves != beforeSaves+1 || c.journal[id].Status != "delivered" {
+		t.Fatal("first delivery observation was not published and saved exactly once")
+	}
+	for i := 0; i < 3; i++ {
+		next, err := c.Messages("conversation")
+		if err != nil || first != next {
+			t.Fatal("repeat history changed unexpectedly", err)
+		}
+		nextEvents, nextSaves := l.sendEffects(t)
+		if nextEvents != events || nextSaves != saves {
+			t.Fatal("unchanged history retriggered refresh or storage write")
+		}
+	}
+	// A real read receipt must still update the saved journal and notify Android.
+	message.MessageStatus.Status = gmproto.MessageStatusType_OUTGOING_DISPLAYED
+	if _, err := c.Messages("conversation"); err != nil {
+		t.Fatal(err)
+	}
+	nextEvents, nextSaves := l.sendEffects(t)
+	if nextEvents != events+1 || nextSaves != saves+1 || c.journal[id].Status != "read" {
+		t.Fatal("genuine read receipt was suppressed")
+	}
+	if _, err := c.Messages("conversation"); err != nil {
+		t.Fatal(err)
+	}
+	finalEvents, finalSaves := l.sendEffects(t)
+	if finalEvents != nextEvents || finalSaves != nextSaves {
+		t.Fatal("read receipt history restarted the refresh loop")
+	}
+}
+
+func TestDuplicateObservationsPreserveRoutingSafety(t *testing.T) {
+	for _, mismatch := range []struct{ protocol, sim string }{{"SMS", "personal"}, {"RCS", "work"}} {
+		c, _, l := fixture(t)
+		id := uuid.NewString()
+		if _, err := c.Send("conversation", "personal", "hello", id); err != nil {
+			t.Fatal(err)
+		}
+		observed := messageView{RequestID: id, ConversationID: "conversation", Outgoing: true,
+			StatusCode: 2, Protocol: "RCS", SIMID: "personal"}
+		c.observe(observed)
+		events, saves := l.sendEffects(t)
+		// An older status at the same route must not cause a false change.
+		observed.StatusCode = 1
+		c.observe(observed)
+		nextEvents, nextSaves := l.sendEffects(t)
+		if nextEvents != events || nextSaves != saves {
+			t.Fatal("older status retriggered a send event")
+		}
+		observed.Protocol, observed.SIMID = mismatch.protocol, mismatch.sim
+		c.observe(observed)
+		nextEvents, nextSaves = l.sendEffects(t)
+		if nextEvents != events+1 || nextSaves != saves+1 || !c.journal[id].Mismatch {
+			t.Fatal("real protocol/SIM mismatch was suppressed")
+		}
+		c.observe(observed)
+		finalEvents, finalSaves := l.sendEffects(t)
+		if finalEvents != nextEvents || finalSaves != nextSaves {
+			t.Fatal("duplicate mismatch was republished")
+		}
+		if _, err := c.Send("conversation", "personal", "next", uuid.NewString()); err == nil {
+			t.Fatal("idempotence cleared the routing safety block")
+		}
+	}
+}
+
+func TestSendEventsIdentifyConversation(t *testing.T) {
+	c, _, l := fixture(t)
+	id := uuid.NewString()
+	if _, err := c.Send("conversation", "personal", "hello", id); err != nil {
+		t.Fatal(err)
+	}
+	c.observe(messageView{RequestID: id, ConversationID: "conversation", Outgoing: true, StatusCode: 2, Protocol: "RCS", SIMID: "personal"})
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	count := 0
+	for _, raw := range l.events {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(raw), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event["type"] == "send" {
+			count++
+			if event["conversationId"] != "conversation" {
+				t.Fatal("send event cannot be matched to the visible conversation")
+			}
+		}
+	}
+	if count != 2 {
+		t.Fatalf("expected one initial send result and one delivery observation, got %d", count)
 	}
 }
